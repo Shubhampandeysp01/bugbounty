@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bug Bounty Research Vault</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.0/styles/github-dark.min.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Top Bar -->
+    <header id="topbar">
+      <div class="topbar-left">
+        <button id="sidebar-toggle" class="icon-btn" aria-label="Toggle sidebar">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+        </button>
+        <div class="logo">
+          <span class="logo-icon">⬡</span>
+          <span class="logo-text">Bug Bounty Vault</span>
+        </div>
+      </div>
+      <div class="topbar-center">
+        <div class="search-container">
+          <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="search-input" placeholder="Search guides, exploits, papers..." autocomplete="off">
+          <div id="search-results" class="search-dropdown hidden"></div>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span id="stats-badge" class="stats-badge">0 files</span>
+      </div>
+    </header>
+
+    <div id="main-layout">
+      <!-- Sidebar -->
+      <nav id="sidebar" class="sidebar">
+        <div class="sidebar-header">
+          <span class="sidebar-title">Library</span>
+          <button id="collapse-all" class="icon-btn-sm" title="Collapse all">−</button>
+        </div>
+        <div id="tree-container" class="tree-container">
+          <div class="tree-loading">
+            <div class="spinner"></div>
+            <span>Loading library...</span>
+          </div>
+        </div>
+      </nav>
+
+      <!-- Content -->
+      <main id="content">
+        <div id="welcome" class="welcome">
+          <div class="welcome-graphic">
+            <div class="hex-grid"></div>
+          </div>
+          <h1 class="welcome-title">Bug Bounty Research Vault</h1>
+          <p class="welcome-subtitle">A curated collection of security research resources</p>
+          <div class="welcome-cards" id="welcome-cards">
+            <div class="welcome-card" data-category="guides">
+              <div class="card-icon">📘</div>
+              <div class="card-count" id="count-guides">0</div>
+              <div class="card-label">Guides</div>
+            </div>
+            <div class="welcome-card" data-category="references">
+              <div class="card-icon">📚</div>
+              <div class="card-count" id="count-references">0</div>
+              <div class="card-label">References</div>
+            </div>
+            <div class="welcome-card" data-category="case-studies">
+              <div class="card-icon">🔬</div>
+              <div class="card-count" id="count-case-studies">0</div>
+              <div class="card-label">Case Studies</div>
+            </div>
+          </div>
+          <div class="welcome-tips">
+            <p>Select a file from the sidebar or search to begin</p>
+          </div>
+        </div>
+
+        <div id="reader" class="reader hidden">
+          <div class="reader-header">
+            <div class="reader-meta">
+              <span id="reader-category" class="reader-category-badge"></span>
+              <h1 id="reader-title" class="reader-title"></h1>
+            </div>
+            <div class="reader-actions">
+              <button id="reader-raw" class="btn-ghost" title="View raw markdown">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/></svg>
+              </button>
+            </div>
+          </div>
+          <div id="reader-content" class="reader-content"></div>
+        </div>
+
+        <div id="raw-viewer" class="raw-viewer hidden">
+          <div class="raw-header">
+            <span>Raw Markdown</span>
+            <button id="raw-close" class="icon-btn-sm">✕</button>
+          </div>
+          <pre id="raw-content" class="raw-content"></pre>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.0/highlight.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
