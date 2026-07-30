@@ -173,8 +173,9 @@ async function loadFile(path) {
     // Store raw for raw viewer
     dom.rawContent.textContent = file.raw;
 
-    // Scroll to top
-    document.getElementById('content').scrollTop = 0;
+    // Scroll to top of content area smoothly
+    const contentEl = document.getElementById('content');
+    contentEl.scrollTo({ top: 0, behavior: 'smooth' });
 
     // Update URL
     history.pushState({ path }, '', `?path=${encodeURIComponent(path)}`);

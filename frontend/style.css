@@ -447,11 +447,15 @@ body {
   padding-left: 60px;
 }
 
+/* ─── Utility ─────────────────────────────────────────────────────────────── */
+.hidden { display: none !important; }
+
 /* ─── Welcome Screen ─────────────────────────────────────────────────────── */
 #content {
   flex: 1;
   overflow-y: auto;
   position: relative;
+  scroll-behavior: smooth;
 }
 
 .welcome {
@@ -469,6 +473,8 @@ body {
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
 }
+
+.welcome.hidden { display: none; }
 
 .welcome-graphic {
   position: absolute;
