@@ -37,14 +37,27 @@
     <div id="main-layout">
       <!-- Sidebar -->
       <nav id="sidebar" class="sidebar">
-        <div class="sidebar-header">
-          <span class="sidebar-title">Library</span>
-          <button id="collapse-all" class="icon-btn-sm" title="Collapse all">−</button>
+        <div class="sidebar-section">
+          <div class="sidebar-header">
+            <span class="sidebar-title">Learning</span>
+            <button id="collapse-all" class="icon-btn-sm" title="Collapse all">−</button>
+          </div>
+          <div id="tree-container" class="tree-container">
+            <div class="tree-loading">
+              <div class="spinner"></div>
+              <span>Loading library...</span>
+            </div>
+          </div>
         </div>
-        <div id="tree-container" class="tree-container">
-          <div class="tree-loading">
-            <div class="spinner"></div>
-            <span>Loading library...</span>
+        <div class="sidebar-section">
+          <div class="sidebar-header">
+            <span class="sidebar-title">Tools</span>
+          </div>
+          <div class="tools-list">
+            <div class="tool-item" data-tool="wordpress-check">
+              <span class="tool-icon">🔍</span>
+              <span class="tool-label">WordPress Version Check</span>
+            </div>
           </div>
         </div>
       </nav>
@@ -100,6 +113,52 @@
             <button id="raw-close" class="icon-btn-sm">✕</button>
           </div>
           <pre id="raw-content" class="raw-content"></pre>
+        </div>
+
+        <div id="tools-panel" class="tools-panel hidden">
+          <div id="wordpress-check" class="tool-pane">
+            <div class="tool-pane-header">
+              <h2>🔍 WordPress Version Check</h2>
+              <p class="tool-pane-desc">Check the WordPress version of any website by analyzing its public endpoints.</p>
+            </div>
+            <div class="tool-pane-body">
+              <div class="tool-input-group">
+                <input type="url" id="wp-check-url" placeholder="https://example.com" autocomplete="off">
+                <button id="wp-check-btn" class="btn-primary">Check</button>
+              </div>
+              <div id="wp-check-results" class="tool-results hidden">
+                <div class="result-card version-card">
+                  <div class="result-label">WordPress Version</div>
+                  <div id="wp-version" class="result-value">—</div>
+                </div>
+                <div class="result-card">
+                  <div class="result-label">Source</div>
+                  <div id="wp-source" class="result-value">—</div>
+                </div>
+                <div class="result-card">
+                  <div class="result-label">REST API</div>
+                  <div id="wp-rest-api" class="result-value">—</div>
+                </div>
+                <div class="result-card">
+                  <div class="result-label">XML-RPC</div>
+                  <div id="wp-xmlrpc" class="result-value">—</div>
+                </div>
+                <div class="result-card">
+                  <div class="result-label">readme.html</div>
+                  <div id="wp-readme" class="result-value">—</div>
+                </div>
+                <div class="result-card">
+                  <div class="result-label">Server</div>
+                  <div id="wp-server" class="result-value">—</div>
+                </div>
+                <div id="wp-error" class="tool-error hidden"></div>
+              </div>
+              <div id="wp-check-spinner" class="tool-spinner hidden">
+                <div class="spinner"></div>
+                <span>Scanning target...</span>
+              </div>
+            </div>
+          </div>
         </div>
       </main>
     </div>

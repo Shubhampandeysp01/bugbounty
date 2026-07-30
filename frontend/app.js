@@ -31,6 +31,19 @@ const dom = {
   countReferences: $('#count-references'),
   countCaseStudies: $('#count-case-studies'),
   welcomeCards: $$('.welcome-card'),
+  toolsPanel: $('#tools-panel'),
+  toolItems: $$('.tool-item'),
+  wpCheckUrl: $('#wp-check-url'),
+  wpCheckBtn: $('#wp-check-btn'),
+  wpCheckResults: $('#wp-check-results'),
+  wpCheckSpinner: $('#wp-check-spinner'),
+  wpVersion: $('#wp-version'),
+  wpSource: $('#wp-source'),
+  wpRestApi: $('#wp-rest-api'),
+  wpXmlrpc: $('#wp-xmlrpc'),
+  wpReadme: $('#wp-readme'),
+  wpServer: $('#wp-server'),
+  wpError: $('#wp-error'),
 };
 
 // ─── API ───────────────────────────────────────────────────────────────────
@@ -325,6 +338,111 @@ function findFirstFile(nodes) {
   return null;
 }
 
+// ─── Tools ──────────────────────────────────────────────────────────────────
+
+function switchToTool(toolId) {
+  // Update active state in tools list
+  dom.toolItems.forEach(el => el.classList.remove('active'));
+  const activeTool = document.querySelector(`.tool-item[data-tool="${toolId}"]`);
+  if (activeTool) activeTool.classList.add('active');
+
+  // Hide learning views, show tools panel
+  dom.welcome.classList.add('hidden');
+  dom.reader.classList.add('hidden');
+  dom.rawViewer.classList.add('hidden');
+  state.rawViewerOpen = false;
+  dom.toolsPanel.classList.remove('hidden');
+
+  // Show the specific tool pane
+  $$('.tool-pane').forEach(el => el.classList.add('hidden'));
+  const pane = document.getElementById(toolId);
+  if (pane) pane.classList.remove('hidden');
+
+  // Update URL
+  history.pushState({ tool: toolId }, '', `?tool=${toolId}`);
+
+  // Close search
+  closeSearch();
+}
+
+// Tool item click handlers
+dom.toolItems.forEach(item => {
+  item.addEventListener('click', () => {
+    switchToTool(item.dataset.tool);
+  });
+});
+
+// WordPress Version Check
+async function checkWordPressVersion() {
+  const url = dom.wpCheckUrl.value.trim();
+  if (!url) {
+    dom.wpCheckUrl.focus();
+    return;
+  }
+
+  // Add https:// if missing
+  let targetUrl = url;
+  if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+    targetUrl = 'https://' + targetUrl;
+  }
+
+  dom.wpCheckBtn.disabled = true;
+  dom.wpCheckResults.classList.add('hidden');
+  dom.wpError.classList.add('hidden');
+  dom.wpCheckSpinner.classList.remove('hidden');
+
+  try {
+    const res = await fetch(`/api/tools/wordpress-check?url=${encodeURIComponent(targetUrl)}`);
+    const data = await res.json();
+
+    dom.wpCheckSpinner.classList.add('hidden');
+    dom.wpCheckResults.classList.remove('hidden');
+
+    if (data.error) {
+      dom.wpError.textContent = 'Error: ' + data.error;
+      dom.wpError.classList.remove('hidden');
+    }
+
+    // Version
+    dom.wpVersion.textContent = data.version || 'Not detected';
+    dom.wpVersion.style.color = data.version ? 'var(--accent)' : 'var(--text-muted)';
+
+    // Source
+    const sourceLabels = {
+      'generator_meta_tag': 'Meta Generator Tag',
+      'wp_json': 'REST API (/wp-json/)',
+      'readme_html': 'readme.html',
+    };
+    dom.wpSource.textContent = data.version_source ? (sourceLabels[data.version_source] || data.version_source) : '—';
+
+    // REST API
+    dom.wpRestApi.textContent = data.rest_api_available ? '✅ Available' : '❌ Not found';
+    dom.wpRestApi.style.color = data.rest_api_available ? 'var(--accent)' : 'var(--text-muted)';
+
+    // XML-RPC
+    dom.wpXmlrpc.textContent = data.xmlrpc_available ? '⚠️ Enabled' : '✅ Disabled / Blocked';
+    dom.wpXmlrpc.style.color = data.xmlrpc_available ? 'var(--yellow)' : 'var(--accent)';
+
+    // readme.html
+    dom.wpReadme.textContent = data.readme_accessible ? '⚠️ Accessible' : '✅ Blocked / Hidden';
+    dom.wpReadme.style.color = data.readme_accessible ? 'var(--yellow)' : 'var(--accent)';
+
+    // Server
+    dom.wpServer.textContent = data.headers?.server || '—';
+  } catch (err) {
+    dom.wpCheckSpinner.classList.add('hidden');
+    dom.wpError.textContent = 'Failed to check: ' + err.message;
+    dom.wpError.classList.remove('hidden');
+  } finally {
+    dom.wpCheckBtn.disabled = false;
+  }
+}
+
+dom.wpCheckBtn.addEventListener('click', checkWordPressVersion);
+dom.wpCheckUrl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') checkWordPressVersion();
+});
+
 // ─── Keyboard Shortcuts ────────────────────────────────────────────────────
 document.addEventListener('keydown', (e) => {
   // Ctrl/Cmd + K → focus search
@@ -349,10 +467,14 @@ document.addEventListener('keydown', (e) => {
 window.addEventListener('popstate', (e) => {
   if (e.state && e.state.path) {
     loadFile(e.state.path);
+  } else if (e.state && e.state.tool) {
+    switchToTool(e.state.tool);
   } else {
     dom.welcome.classList.remove('hidden');
     dom.reader.classList.add('hidden');
     dom.rawViewer.classList.add('hidden');
+    dom.toolsPanel.classList.add('hidden');
+    dom.toolItems.forEach(el => el.classList.remove('active'));
   }
 });
 
@@ -370,11 +492,14 @@ async function init() {
     state.tree = await api.getTree();
     renderTree(state.tree, dom.treeContainer);
 
-    // Check URL for direct file load
+    // Check URL for direct file load or tool
     const params = new URLSearchParams(window.location.search);
     const filePath = params.get('path');
+    const toolId = params.get('tool');
     if (filePath) {
       await loadFile(filePath);
+    } else if (toolId) {
+      switchToTool(toolId);
     }
   } catch (err) {
     console.error('Init failed:', err);

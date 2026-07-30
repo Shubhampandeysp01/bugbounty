@@ -8,6 +8,7 @@ use axum::{
 use chrono::Utc;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use pulldown_cmark::{html, Options, Parser};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -82,6 +83,7 @@ struct FileResponse {
     raw: String,
     category: String,
 }
+
 
 // ─── Tantivy Schema ──────────────────────────────────────────────────────────
 
@@ -442,6 +444,157 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Value
     }))
 }
 
+// ─── WordPress Check ───────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct WpCheckResponse {
+    url: String,
+    version: Option<String>,
+    version_source: Option<String>,
+    detected: bool,
+    generator_tag: Option<String>,
+    rest_api_available: bool,
+    xmlrpc_available: bool,
+    readme_accessible: bool,
+    wp_json_version: Option<String>,
+    headers: std::collections::HashMap<String, String>,
+    error: Option<String>,
+}
+
+async fn wordpress_check(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<WpCheckResponse>, (StatusCode, String)> {
+    let url = params.get("url").ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, "Missing 'url' parameter".to_string())
+    })?;
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) BugBountyVault/1.0")
+        .build()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Client error: {}", e)))?;
+
+    let mut result = WpCheckResponse {
+        url: url.clone(),
+        version: None,
+        version_source: None,
+        detected: false,
+        generator_tag: None,
+        rest_api_available: false,
+        xmlrpc_available: false,
+        readme_accessible: false,
+        wp_json_version: None,
+        headers: std::collections::HashMap::new(),
+        error: None,
+    };
+
+    // Normalize URL
+    let base_url = url.trim_end_matches('/');
+
+    // 1. Fetch the main page and check generator meta tag
+    match client.get(base_url).send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            result.headers.insert("status_code".to_string(), status.to_string());
+            
+            if let Some(server) = resp.headers().get("server").and_then(|v| v.to_str().ok()) {
+                result.headers.insert("server".to_string(), server.to_string());
+            }
+            if let Some(powered) = resp.headers().get("x-powered-by").and_then(|v| v.to_str().ok()) {
+                result.headers.insert("x-powered-by".to_string(), powered.to_string());
+            }
+            
+            if let Ok(body) = resp.text().await {
+                // Check for generator meta tag
+                if let Some(start) = body.find(r#"<meta name="generator""#) {
+                    let snippet = &body[start..(start + 200).min(body.len())];
+                    result.generator_tag = Some(snippet.to_string());
+                    result.detected = true;
+                    
+                    // Extract version from generator tag
+                    if let Some(v_start) = snippet.find(r#"content="WordPress "#) {
+                        let v_part = &snippet[v_start + 19..];
+                        if let Some(v_end) = v_part.find('"') {
+                            result.version = Some(v_part[..v_end].to_string());
+                            result.version_source = Some("generator_meta_tag".to_string());
+                        }
+                    }
+                }
+                
+                // Check for wp-json link in head
+                if body.contains("/wp-json/") || body.contains("wp-json") {
+                    result.rest_api_available = true;
+                }
+            }
+        }
+        Err(e) => {
+            result.error = Some(format!("Failed to fetch main page: {}", e));
+        }
+    }
+
+    // 2. Check /wp-json/ for version info
+    let wp_json_url = format!("{}/wp-json/", base_url);
+    match client.get(&wp_json_url).send().await {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                result.rest_api_available = true;
+                if let Ok(body) = resp.text().await {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                        if let Some(ver) = json.get("version").and_then(|v| v.as_str()) {
+                            result.wp_json_version = Some(ver.to_string());
+                            if result.version.is_none() {
+                                result.version = Some(ver.to_string());
+                                result.version_source = Some("wp_json".to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(_) => {}
+    }
+
+    // 3. Check /xmlrpc.php
+    let xmlrpc_url = format!("{}/xmlrpc.php", base_url);
+    match client.post(&xmlrpc_url).send().await {
+        Ok(resp) => {
+            if resp.status().is_success() || resp.status().as_u16() == 405 {
+                result.xmlrpc_available = true;
+            }
+        }
+        Err(_) => {}
+    }
+
+    // 4. Check /readme.html
+    let readme_url = format!("{}/readme.html", base_url);
+    match client.get(&readme_url).send().await {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                result.readme_accessible = true;
+                if result.version.is_none() {
+                    if let Ok(body) = resp.text().await {
+                        if let Some(start) = body.find("Version ") {
+                            let v_part = &body[start + 8..(start + 20).min(body.len())];
+                            let v: String = v_part.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+                            if !v.is_empty() {
+                                result.version = Some(v);
+                                result.version_source = Some("readme_html".to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(_) => {}
+    }
+
+    if result.version.is_some() {
+        result.detected = true;
+    }
+
+    Ok(Json(result))
+}
+
 // ─── File Watcher ───────────────────────────────────────────────────────────
 
 fn start_file_watcher(state: Arc<AppState>) {
@@ -558,6 +711,7 @@ async fn main() {
         .route("/api/file", get(get_file))
         .route("/api/search", get(search_files))
         .route("/api/stats", get(get_stats))
+        .route("/api/tools/wordpress-check", get(wordpress_check))
         .layer(CorsLayer::permissive())
         .with_state(state)
         .fallback_service(ServeDir::new("frontend").append_index_html_on_directories(true));
