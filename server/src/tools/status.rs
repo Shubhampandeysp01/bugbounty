@@ -35,6 +35,13 @@ pub async fn tools_status() -> Json<ToolsStatusResponse> {
         ("httpx-probe", "httpx", "web", "Live Probe"),
         ("nuclei-scan", "nuclei", "web", "Vuln Scan"),
         ("ffuf-fuzz", "ffuf", "web", "Path Fuzz"),
+        ("cors-check", "", "web", "CORS Check"),
+        ("open-redirect", "", "web", "Open Redirect"),
+        // Recon
+        ("subfinder-enum", "subfinder", "recon", "Subdomain Enum"),
+        ("waybackurls-mine", "waybackurls", "recon", "Archive URLs"),
+        ("katana-crawl", "katana", "recon", "Crawler"),
+        ("js-analysis", "", "recon", "JS Analysis"),
         // Local
         ("gitleaks-scan", "gitleaks", "local", "Secrets Scan"),
         ("trivy-scan", "trivy", "local", "FS Vuln Scan"),

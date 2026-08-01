@@ -12,12 +12,18 @@
 //!   local     → local filesystem secrets & vulns
 
 pub mod common;
+pub mod cors_check;
 pub mod ffuf;
 pub mod gitleaks;
 pub mod httpx;
+pub mod js_analysis;
+pub mod katana;
 pub mod nuclei;
+pub mod open_redirect;
 pub mod status;
+pub mod subfinder;
 pub mod trivy;
+pub mod waybackurls;
 pub mod wordpress;
 pub mod wordpress_nuclei;
 pub mod wordpress_paths;
@@ -78,6 +84,13 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/tools/httpx", get(httpx::httpx_probe))
         .route("/api/tools/nuclei", get(nuclei::nuclei_scan))
         .route("/api/tools/ffuf", get(ffuf::ffuf_fuzz))
+        .route("/api/tools/cors-check", get(cors_check::cors_check))
+        .route("/api/tools/open-redirect", get(open_redirect::open_redirect))
+        // Recon
+        .route("/api/tools/subfinder", get(subfinder::subdomain_enum))
+        .route("/api/tools/waybackurls", get(waybackurls::archive_urls))
+        .route("/api/tools/katana", get(katana::crawl))
+        .route("/api/tools/js-analysis", get(js_analysis::js_analysis))
         // Local files
         .route("/api/tools/gitleaks", get(gitleaks::gitleaks_scan))
         .route("/api/tools/trivy", get(trivy::trivy_scan))

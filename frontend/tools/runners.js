@@ -384,6 +384,226 @@ window.VAULT_TOOL_RUNNERS = {
       );
     },
 
+    'subdomains'(data) {
+      if (!data.installed) {
+        return missing(data, 'subfinder');
+      }
+      const subs = data.subdomains || [];
+      let list = '';
+      if (subs.length === 0) {
+        list = emptyMsg('No subdomains found. Add provider API keys to subfinder config for more sources.');
+      } else {
+        list = `<div class="findings-list">${subs
+          .map((s) => `<div class="finding-row sev-info">
+            <span class="finding-sev">sub</span>
+            <div class="finding-body">
+              <div class="finding-name mono">${escapeHtml(s)}</div>
+              <div class="finding-meta">${escapeHtml(data.domain || '')}</div>
+            </div>
+          </div>`)
+          .join('')}</div>`;
+      }
+      return (
+        `<div class="tool-results-grid">
+          ${card('Subdomains', String(subs.length))}
+          ${card('Domain', data.domain || '—')}
+        </div>` +
+        list +
+        (data.error ? `<div class="tool-error">${escapeHtml(data.error)}</div>` : '') +
+        rawBlock(data.raw)
+      );
+    },
+
+    'url-list'(data) {
+      if (!data.installed) {
+        return missing(data, data.command && data.command.includes('katana') ? 'katana' : 'waybackurls');
+      }
+      const urls = data.urls || [];
+      let list = '';
+      if (urls.length === 0) {
+        list = emptyMsg('No URLs found.');
+      } else {
+        list = `<div class="findings-list">${urls
+          .map((u) => `<div class="finding-row sev-info">
+            <span class="finding-sev">url</span>
+            <div class="finding-body">
+              <div class="finding-name mono">${escapeHtml(u)}</div>
+            </div>
+          </div>`)
+          .join('')}</div>`;
+      }
+      return (
+        metaBar(data) +
+        `<div class="tool-results-grid">
+          ${card('URLs', String(data.count ?? urls.length))}
+        </div>` +
+        list +
+        (data.error ? `<div class="tool-error">${escapeHtml(data.error)}</div>` : '') +
+        rawBlock(data.raw)
+      );
+    },
+
+    'js-analysis'(data) {
+      if (!data.installed) {
+        return missing(data, 'js-analysis');
+      }
+      const counts = data.counts || {};
+      const scripts = data.scripts || [];
+      const endpoints = data.endpoints || [];
+      const secrets = data.secrets || [];
+
+      let scriptLine = '';
+      if (scripts.length) {
+        scriptLine = `<p class="tool-note">Scripts (${scripts.length})</p>
+          <div class="tag-cloud">${scripts
+            .map((s) => `<span class="tag-chip mono" title="${escapeHtml(s.url)}">${escapeHtml(s.url)}</span>`)
+            .join('')}</div>`;
+      }
+
+      let apiBlock = '';
+      const apiUrls = endpoints.filter(
+        (u) => u.includes('/api/') || u.includes('/graphql') || u.includes('/wp-json')
+      );
+      if (apiUrls.length) {
+        apiBlock = `<p class="tool-note">API endpoints</p>
+          <div class="findings-list">${apiUrls
+            .map((u) => `<div class="finding-row sev-high">
+              <span class="finding-sev">api</span>
+              <div class="finding-body"><div class="finding-name mono">${escapeHtml(u)}</div></div>
+            </div>`)
+            .join('')}</div>`;
+      }
+
+      let endpointBlock = '';
+      if (endpoints.length) {
+        endpointBlock = `<details class="tool-raw-details" ${apiUrls.length ? '' : 'open'}>
+          <summary>All endpoints (${endpoints.length})</summary>
+          <div class="findings-list">${endpoints
+            .map((u) => `<div class="finding-row sev-info">
+              <span class="finding-sev">ep</span>
+              <div class="finding-body"><div class="finding-name mono">${escapeHtml(u)}</div></div>
+            </div>`)
+            .join('')}</div>
+        </details>`;
+      }
+
+      let secretBlock = '';
+      if (secrets.length) {
+        secretBlock = `<p class="tool-note">Possible secrets — verify before trusting!</p>
+          <div class="findings-list">${secrets
+            .map((s) => `<div class="finding-row sev-critical">
+              <span class="finding-sev">${escapeHtml(s.key)}</span>
+              <div class="finding-body">
+                <div class="finding-meta mono">${escapeHtml(s.value)}</div>
+              </div>
+            </div>`)
+            .join('')}</div>`;
+      }
+
+      return (
+        metaBar(data) +
+        `<div class="tool-results-grid">
+          ${card('Scripts', String(counts.scripts ?? scripts.length))}
+          ${card('Endpoints', String(counts.endpoints ?? endpoints.length))}
+          ${card('API routes', String(counts.api_endpoints ?? apiUrls.length))}
+          ${card('Secrets', String(counts.secrets ?? secrets.length))}
+        </div>` +
+        scriptLine +
+        apiBlock +
+        endpointBlock +
+        secretBlock +
+        (data.error ? `<div class="tool-error">${escapeHtml(data.error)}</div>` : '') +
+        rawBlock(data.raw)
+      );
+    },
+
+    'cors-check'(data) {
+      if (!data.installed) {
+        return missing(data, 'cors-check');
+      }
+      const tests = data.tests || [];
+      let list = '';
+      if (!tests.length) {
+        list = emptyMsg('No tests run.');
+      } else {
+        list = `<div class="findings-list">${tests
+          .map((t) => {
+            const sev = t.verdict || 'ok';
+            const ao = t.allow_origin
+              ? `· ACAO: ${escapeHtml(t.allow_origin)}`
+              : '';
+            const cred = t.allow_credentials
+              ? ' · ⚠️ Allow-Credentials: true'
+              : '';
+            return `<div class="finding-row sev-${escapeHtml(sev)}">
+              <span class="finding-sev">${escapeHtml(sev)}</span>
+              <div class="finding-body">
+                <div class="finding-name">${escapeHtml(t.name)} <code class="mono">${escapeHtml(t.origin)}</code></div>
+                <div class="finding-meta">${escapeHtml(t.note)}${ao}${cred}</div>
+              </div>
+            </div>`;
+          })
+          .join('')}</div>`;
+      }
+      const risk =
+        data.high_risk
+          ? `<p class="tool-note">High risk — reflected origin with credentials (or wildcard+credentials).</p>`
+          : data.medium_risk
+            ? `<p class="tool-note">Medium risk — reflected origin without credentials.</p>`
+            : `<p class="tool-note">No risky CORS configuration detected.</p>`;
+      return (
+        metaBar(data) +
+        `<div class="tool-results-grid">
+          ${card('Tests', String(tests.length))}
+          ${card('High risk', data.high_risk ? '⚠️ Yes' : 'No')}
+        </div>` +
+        risk +
+        list +
+        (data.error ? `<div class="tool-error">${escapeHtml(data.error)}</div>` : '')
+      );
+    },
+
+    'open-redirect'(data) {
+      if (!data.installed) {
+        return missing(data, 'open-redirect');
+      }
+      const tests = data.tests || [];
+      let list = '';
+      if (!tests.length) {
+        list = emptyMsg('No tests run.');
+      } else {
+        list = `<div class="findings-list">${tests
+          .map((t) => {
+            const sev = t.vulnerable ? 'high' : 'info';
+            const loc = t.location
+              ? `<div class="finding-meta mono">Location: ${escapeHtml(t.location)}</div>`
+              : '';
+            return `<div class="finding-row sev-${escapeHtml(sev)}">
+              <span class="finding-sev">${escapeHtml(t.vulnerable ? 'open' : t.status != null ? String(t.status) : 'err')}</span>
+              <div class="finding-body">
+                <div class="finding-name mono">?${escapeHtml(t.param)}=</div>
+                <div class="finding-meta">${escapeHtml(t.note)}</div>
+                ${loc}
+              </div>
+            </div>`;
+          })
+          .join('')}</div>`;
+      }
+      const verdict = data.vulnerable
+        ? `<p class="tool-note">Potential open redirect — verify manually!</p>`
+        : `<p class="tool-note">No off-site redirects on the probed params.</p>`;
+      return (
+        metaBar(data) +
+        `<div class="tool-results-grid">
+          ${card('Params probed', String(tests.length))}
+          ${card('Vulnerable', data.vulnerable ? '⚠️ Yes' : 'No')}
+        </div>` +
+        verdict +
+        list +
+        (data.error ? `<div class="tool-error">${escapeHtml(data.error)}</div>` : '')
+      );
+    },
+
     httpx(data) {
       if (!data.installed) {
         return missing(data, 'httpx');

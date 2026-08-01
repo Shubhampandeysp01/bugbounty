@@ -3,6 +3,7 @@
  *
  * Categories (keep lean):
  *   wordpress → CMS tools
+ *   recon     → asset discovery / surface mapping
  *   web       → website probe / scan / fuzz
  *   local     → scan files on disk
  *
@@ -195,6 +196,97 @@ window.VAULT_TOOLS = {
       ],
     },
     {
+      id: 'recon',
+      label: 'Recon',
+      eyebrow: 'Discovery',
+      tools: [
+        {
+          id: 'subfinder-enum',
+          label: 'Subdomain Enum',
+          desc: 'Subfinder passive enumeration',
+          badge: 'Enum',
+          title: 'Subdomain Enumeration (subfinder)',
+          blurb: 'Passive subdomain discovery from public sources. -all pulls every source (needs provider API keys for best results).',
+          binary: 'subfinder',
+          input: {
+            type: 'url',
+            name: 'url',
+            placeholder: 'example.com',
+            label: 'Target domain',
+          },
+          extras: [
+            {
+              type: 'text',
+              name: 'all',
+              placeholder: '1',
+              label: 'All sources (1)',
+            },
+          ],
+          endpoint: '/api/tools/subfinder',
+          render: 'subdomains',
+        },
+        {
+          id: 'waybackurls-mine',
+          label: 'Archive URLs',
+          desc: 'Historical URLs from the Wayback Machine',
+          badge: 'Mine',
+          title: 'Archive URL Mining (waybackurls)',
+          blurb: 'Pull every archived URL for a domain from the Internet Archive — great for finding old endpoints, params, and exposed files.',
+          binary: 'waybackurls',
+          input: {
+            type: 'url',
+            name: 'url',
+            placeholder: 'example.com',
+            label: 'Target domain',
+          },
+          endpoint: '/api/tools/waybackurls',
+          render: 'url-list',
+        },
+        {
+          id: 'katana-crawl',
+          label: 'Crawler',
+          desc: 'Katana crawl with JS execution',
+          badge: 'Crawl',
+          title: 'Crawler (katana)',
+          blurb: 'Crawl the site and enumerate endpoints, forms, and JS-discovered links. JS crawling is enabled; cap depth to stay fast.',
+          binary: 'katana',
+          input: {
+            type: 'url',
+            name: 'url',
+            placeholder: 'https://example.com',
+            label: 'Target URL',
+          },
+          extras: [
+            {
+              type: 'text',
+              name: 'depth',
+              placeholder: '2',
+              label: 'Crawl depth',
+            },
+          ],
+          endpoint: '/api/tools/katana',
+          render: 'url-list',
+        },
+        {
+          id: 'js-analysis',
+          label: 'JS Analysis',
+          desc: 'Endpoints + secrets from JS',
+          badge: 'Intel',
+          title: 'JavaScript Analysis',
+          blurb: 'Fetch a page (or a raw .js URL) and mine endpoints, API routes, and secret-looking strings from all loaded scripts.',
+          binary: null,
+          input: {
+            type: 'url',
+            name: 'url',
+            placeholder: 'https://example.com  or  https://…/app.js',
+            label: 'Target URL',
+          },
+          endpoint: '/api/tools/js-analysis',
+          render: 'js-analysis',
+        },
+      ],
+    },
+    {
       id: 'web',
       label: 'Websites',
       eyebrow: 'Targets',
@@ -263,6 +355,42 @@ window.VAULT_TOOLS = {
           },
           endpoint: '/api/tools/ffuf',
           render: 'ffuf',
+        },
+        {
+          id: 'cors-check',
+          label: 'CORS Check',
+          desc: 'Misconfiguration probe',
+          badge: 'Config',
+          title: 'CORS Misconfiguration Check',
+          blurb:
+            'Send requests with attacker-controlled Origin headers and flag reflected / credentialed `Access-Control-Allow-Origin` responses.',
+          binary: null,
+          input: {
+            type: 'url',
+            name: 'url',
+            placeholder: 'https://api.example.com',
+            label: 'Target URL',
+          },
+          endpoint: '/api/tools/cors-check',
+          render: 'cors-check',
+        },
+        {
+          id: 'open-redirect',
+          label: 'Open Redirect',
+          desc: 'Probe redirect params',
+          badge: 'Redirect',
+          title: 'Open Redirect Check',
+          blurb:
+            'Append common redirect parameters (url, redirect, next, …) with an off-site payload and flag any 3xx that redirects away.',
+          binary: null,
+          input: {
+            type: 'url',
+            name: 'url',
+            placeholder: 'https://example.com',
+            label: 'Target URL',
+          },
+          endpoint: '/api/tools/open-redirect',
+          render: 'open-redirect',
         },
       ],
     },

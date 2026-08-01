@@ -79,6 +79,29 @@ pub fn normalize_url(raw: &str) -> Result<String, String> {
     Ok(with_scheme.trim_end_matches('/').to_string())
 }
 
+/// Normalize a bare domain input: strip scheme / path / port, validate chars.
+pub fn normalize_domain(raw: &str) -> Result<String, String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Err("Domain is empty".into());
+    }
+    if t.len() > 253 {
+        return Err("Domain too long".into());
+    }
+    if t.chars().any(|c| c.is_whitespace() || ";|&`$(){}<>\"'\\".contains(c)) {
+        return Err("Domain contains invalid characters".into());
+    }
+    let stripped = t
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let host = stripped.split(['/', ':', '?']).next().unwrap_or(stripped);
+    let host = host.trim().trim_end_matches('.');
+    if host.is_empty() || !host.contains('.') {
+        return Err("Invalid domain (expected something like example.com)".into());
+    }
+    Ok(host.to_lowercase())
+}
+
 /// Resolve a scan path: absolute as-is if it exists, else under repo_root.
 /// Rejects `..` escapes outside repo when relative.
 pub fn resolve_scan_path(repo_root: &Path, raw: &str) -> Result<PathBuf, String> {
