@@ -1,3 +1,5 @@
+mod tools;
+
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -8,18 +10,15 @@ use axum::{
 use chrono::Utc;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use pulldown_cmark::{html, Options, Parser};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, RwLock};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
 use tantivy::{doc, Index, IndexWriter, ReloadPolicy};
-use tokio::sync::RwLock;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
 use walkdir::WalkDir;
@@ -27,12 +26,11 @@ use walkdir::WalkDir;
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-struct AppState {
+pub struct AppState {
     files: Arc<RwLock<Vec<FileEntry>>>,
     index: Arc<RwLock<TantivyIndex>>,
-    repo_root: PathBuf,
+    pub repo_root: PathBuf,
 }
-
 struct TantivyIndex {
     index: Index,
     writer: std::sync::Mutex<IndexWriter>,
@@ -127,7 +125,7 @@ fn scan_files(repo_root: &Path) -> Vec<FileEntry> {
             .filter_entry(|e| !e.file_name().to_string_lossy().starts_with('.'))
             .filter_map(|e| e.ok())
         {
-            if entry.file_type().is_file() && entry.path().extension().map_or(false, |e| e == "md") {
+            if entry.file_type().is_file() && entry.path().extension().is_some_and(|e| e == "md") {
                 let full_path = entry.path();
                 let relative = full_path
                     .strip_prefix(repo_root)
@@ -171,8 +169,8 @@ fn extract_title(path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("# ") {
-            return Some(trimmed[2..].trim().to_string());
+        if let Some(rest) = trimmed.strip_prefix("# ") {
+            return Some(rest.trim().to_string());
         }
     }
     None
@@ -189,6 +187,11 @@ fn index_files(
     let category_field = schema.get_field("category").unwrap();
 
     let mut writer = writer.lock().unwrap();
+
+    // Drop documents from previous runs so restarts / rescans never duplicate
+    // (the .search_index directory is persisted on disk and gitignored).
+    writer.delete_all_documents()?;
+
     for file in files {
         let content = std::fs::read_to_string(&file.path).unwrap_or_default();
         writer.add_document(doc!(
@@ -284,7 +287,7 @@ fn render_markdown(content: &str) -> String {
 // ─── API Handlers ───────────────────────────────────────────────────────────
 
 async fn get_tree(State(state): State<Arc<AppState>>) -> Json<Vec<TreeNode>> {
-    let files = state.files.read().await;
+    let files = state.files.read().unwrap();
     Json(build_tree(&files))
 }
 
@@ -296,8 +299,18 @@ async fn get_file(
         (StatusCode::BAD_REQUEST, "Missing 'path' parameter".to_string())
     })?;
 
-    let full_path = state.repo_root.join(path);
-    if !full_path.exists() || !full_path.is_file() {
+    // Path-traversal guard: only serve real files that resolve inside repo_root.
+    let repo_canonical = state
+        .repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| state.repo_root.clone());
+    let full_path = state
+        .repo_root
+        .join(path)
+        .canonicalize()
+        .map_err(|_| (StatusCode::NOT_FOUND, "File not found".to_string()))?;
+
+    if !full_path.starts_with(&repo_canonical) || !full_path.is_file() {
         return Err((StatusCode::NOT_FOUND, "File not found".to_string()));
     }
 
@@ -336,7 +349,7 @@ async fn search_files(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SearchQuery>,
 ) -> Json<Vec<SearchResult>> {
-    let index = state.index.read().await;
+    let index = state.index.read().unwrap();
     let schema = &index.schema;
     let title_field = schema.get_field("title").unwrap();
     let body_field = schema.get_field("body").unwrap();
@@ -400,36 +413,39 @@ fn generate_snippet(text: &str, query: &str, max_len: usize) -> String {
     let lower_query = query.to_lowercase();
 
     if let Some(pos) = lower_text.find(&lower_query) {
-        // Use char indices to avoid splitting multi-byte characters
-        let text_chars: Vec<char> = text.chars().collect();
-        let query_chars: Vec<char> = query.chars().collect();
-        
-        // Find the char index of the query match
-        let char_pos = text[..pos].chars().count();
-        
-        let context = 60;
-        let start = char_pos.saturating_sub(context);
-        let end = (char_pos + query_chars.len() + context).min(text_chars.len());
-        
-        let snippet: String = text_chars[start..end].iter().collect();
+        // Only index into `text` with byte math when the hit sits on a valid
+        // char boundary (to_lowercase can shift byte offsets for some scripts).
+        if text.is_char_boundary(pos) {
+            // Use char indices to avoid splitting multi-byte characters
+            let text_chars: Vec<char> = text.chars().collect();
+            let query_chars: Vec<char> = query.chars().collect();
 
-        if start > 0 {
-            format!("...{}...", snippet)
-        } else {
-            format!("{}...", snippet)
+            // Find the char index of the query match
+            let char_pos = text[..pos].chars().count();
+
+            let context = 60;
+            let start = char_pos.saturating_sub(context);
+            let end = (char_pos + query_chars.len() + context).min(text_chars.len());
+
+            let snippet: String = text_chars[start..end].iter().collect();
+
+            if start > 0 {
+                return format!("...{snippet}...");
+            }
+            return format!("{snippet}...");
         }
+    }
+
+    let truncated: String = text.chars().take(max_len).collect();
+    if text.chars().count() > max_len {
+        format!("{truncated}...")
     } else {
-        let truncated: String = text.chars().take(max_len).collect();
-        if text.len() > max_len {
-            format!("{}...", truncated)
-        } else {
-            truncated
-        }
+        truncated
     }
 }
 
 async fn get_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let files = state.files.read().await;
+    let files = state.files.read().unwrap();
     let total = files.len();
     let guides = files.iter().filter(|f| f.category == "guides").count();
     let references = files.iter().filter(|f| f.category == "references").count();
@@ -444,164 +460,16 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Value
     }))
 }
 
-// ─── WordPress Check ───────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-struct WpCheckResponse {
-    url: String,
-    version: Option<String>,
-    version_source: Option<String>,
-    detected: bool,
-    generator_tag: Option<String>,
-    rest_api_available: bool,
-    xmlrpc_available: bool,
-    readme_accessible: bool,
-    wp_json_version: Option<String>,
-    headers: std::collections::HashMap<String, String>,
-    error: Option<String>,
-}
-
-async fn wordpress_check(
-    Query(params): Query<std::collections::HashMap<String, String>>,
-) -> Result<Json<WpCheckResponse>, (StatusCode, String)> {
-    let url = params.get("url").ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, "Missing 'url' parameter".to_string())
-    })?;
-
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) BugBountyVault/1.0")
-        .build()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Client error: {}", e)))?;
-
-    let mut result = WpCheckResponse {
-        url: url.clone(),
-        version: None,
-        version_source: None,
-        detected: false,
-        generator_tag: None,
-        rest_api_available: false,
-        xmlrpc_available: false,
-        readme_accessible: false,
-        wp_json_version: None,
-        headers: std::collections::HashMap::new(),
-        error: None,
-    };
-
-    // Normalize URL
-    let base_url = url.trim_end_matches('/');
-
-    // 1. Fetch the main page and check generator meta tag
-    match client.get(base_url).send().await {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            result.headers.insert("status_code".to_string(), status.to_string());
-            
-            if let Some(server) = resp.headers().get("server").and_then(|v| v.to_str().ok()) {
-                result.headers.insert("server".to_string(), server.to_string());
-            }
-            if let Some(powered) = resp.headers().get("x-powered-by").and_then(|v| v.to_str().ok()) {
-                result.headers.insert("x-powered-by".to_string(), powered.to_string());
-            }
-            
-            if let Ok(body) = resp.text().await {
-                // Check for generator meta tag
-                if let Some(start) = body.find(r#"<meta name="generator""#) {
-                    let snippet = &body[start..(start + 200).min(body.len())];
-                    result.generator_tag = Some(snippet.to_string());
-                    result.detected = true;
-                    
-                    // Extract version from generator tag
-                    if let Some(v_start) = snippet.find(r#"content="WordPress "#) {
-                        let v_part = &snippet[v_start + 19..];
-                        if let Some(v_end) = v_part.find('"') {
-                            result.version = Some(v_part[..v_end].to_string());
-                            result.version_source = Some("generator_meta_tag".to_string());
-                        }
-                    }
-                }
-                
-                // Check for wp-json link in head
-                if body.contains("/wp-json/") || body.contains("wp-json") {
-                    result.rest_api_available = true;
-                }
-            }
-        }
-        Err(e) => {
-            result.error = Some(format!("Failed to fetch main page: {}", e));
-        }
-    }
-
-    // 2. Check /wp-json/ for version info
-    let wp_json_url = format!("{}/wp-json/", base_url);
-    match client.get(&wp_json_url).send().await {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                result.rest_api_available = true;
-                if let Ok(body) = resp.text().await {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-                        if let Some(ver) = json.get("version").and_then(|v| v.as_str()) {
-                            result.wp_json_version = Some(ver.to_string());
-                            if result.version.is_none() {
-                                result.version = Some(ver.to_string());
-                                result.version_source = Some("wp_json".to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Err(_) => {}
-    }
-
-    // 3. Check /xmlrpc.php
-    let xmlrpc_url = format!("{}/xmlrpc.php", base_url);
-    match client.post(&xmlrpc_url).send().await {
-        Ok(resp) => {
-            if resp.status().is_success() || resp.status().as_u16() == 405 {
-                result.xmlrpc_available = true;
-            }
-        }
-        Err(_) => {}
-    }
-
-    // 4. Check /readme.html
-    let readme_url = format!("{}/readme.html", base_url);
-    match client.get(&readme_url).send().await {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                result.readme_accessible = true;
-                if result.version.is_none() {
-                    if let Ok(body) = resp.text().await {
-                        if let Some(start) = body.find("Version ") {
-                            let v_part = &body[start + 8..(start + 20).min(body.len())];
-                            let v: String = v_part.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
-                            if !v.is_empty() {
-                                result.version = Some(v);
-                                result.version_source = Some("readme_html".to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Err(_) => {}
-    }
-
-    if result.version.is_some() {
-        result.detected = true;
-    }
-
-    Ok(Json(result))
-}
-
 // ─── File Watcher ───────────────────────────────────────────────────────────
 
 fn start_file_watcher(state: Arc<AppState>) {
     let repo_root = state.repo_root.clone();
     let state_clone = state.clone();
 
-    tokio::spawn(async move {
+    // The watcher must run on a dedicated OS thread, not on the tokio runtime:
+    // `rx.recv()` and `index_files()`/`commit()` are blocking calls and would
+    // otherwise permanently stall executor workers, wedging the whole server.
+    std::thread::spawn(move || {
         let (tx, rx) = mpsc::channel();
 
         let mut watcher: RecommendedWatcher =
@@ -619,22 +487,37 @@ fn start_file_watcher(state: Arc<AppState>) {
 
         info!("File watcher started");
 
-        // Process events in a loop using blocking recv
+        // Process events in a loop using blocking recv (fine on a plain thread).
         loop {
             match rx.recv() {
-                Ok(event) => {
-                    let ev = event.unwrap();
-                    match ev.kind {
-                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                            let files = scan_files(&repo_root);
-                            let count = files.len();
-                            *state_clone.files.write().await = files;
-                            info!("Files rescanned: {} files", count);
+                Ok(Ok(event)) => {
+                    if matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                    ) {
+                        // Debounce bursts: FSEvents emits several events per edit,
+                        // so drain anything already queued and wait briefly before
+                        // doing the (expensive) rescan + reindex.
+                        while rx.try_recv().is_ok() {}
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        while rx.try_recv().is_ok() {}
+
+                        let files = scan_files(&repo_root);
+                        let count = files.len();
+
+                        // Re-index so search stays in sync with on-disk content.
+                        {
+                            let index = state_clone.index.read().unwrap();
+                            if let Err(e) = index_files(&index.writer, &index.schema, &files) {
+                                warn!("Reindex failed after file change: {e}");
+                            }
                         }
-                        _ => {}
+
+                        *state_clone.files.write().unwrap() = files;
+                        info!("Files rescanned + reindexed: {} files", count);
                     }
                 }
+                Ok(Err(e)) => warn!("File watcher error: {e}"),
                 Err(_) => break,
             }
         }
@@ -660,7 +543,10 @@ async fn main() {
 
     let repo_root = if repo_root.join("guides").exists() {
         repo_root
-    } else if repo_root.parent().map_or(false, |p| p.join("guides").exists()) {
+    } else if repo_root
+        .parent()
+        .is_some_and(|p| p.join("guides").exists())
+    {
         repo_root.parent().unwrap().to_path_buf()
     } else {
         std::env::var("BUGBOUNTY_ROOT")
@@ -670,7 +556,7 @@ async fn main() {
                 let cwd = std::env::current_dir().unwrap();
                 if cwd.join("guides").exists() {
                     cwd
-                } else if cwd.parent().map_or(false, |p| p.join("guides").exists()) {
+                } else if cwd.parent().is_some_and(|p| p.join("guides").exists()) {
                     cwd.parent().unwrap().to_path_buf()
                 } else {
                     warn!("Could not find repo root, using current directory");
@@ -705,14 +591,21 @@ async fn main() {
     // Start file watcher
     start_file_watcher(state.clone());
 
-    // Build router
+    // Restrict CORS to local origins — this tool can read local files / run
+    // scanners, so never let arbitrary web pages read API responses.
+    let cors = CorsLayer::new().allow_origin(AllowOrigin::list([
+        axum::http::header::HeaderValue::from_static("http://localhost:3000"),
+        axum::http::header::HeaderValue::from_static("http://127.0.0.1:3000"),
+    ]));
+
+    // Build router (library APIs + modular tools)
     let app = Router::new()
         .route("/api/tree", get(get_tree))
         .route("/api/file", get(get_file))
         .route("/api/search", get(search_files))
         .route("/api/stats", get(get_stats))
-        .route("/api/tools/wordpress-check", get(wordpress_check))
-        .layer(CorsLayer::permissive())
+        .merge(tools::routes())
+        .layer(cors)
         .with_state(state)
         .fallback_service(ServeDir::new("frontend").append_index_html_on_directories(true));
 

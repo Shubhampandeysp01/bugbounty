@@ -26,6 +26,12 @@ server/target/
 .env.local
 .env.*.local
 
+# Secrets & local vulnerability databases (never commit)
+.secrets/
+tools/data/wordfence/
+*.pem
+*.key
+
 # IDE
 .idea/
 .vscode/
