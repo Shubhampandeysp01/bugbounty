@@ -1,10 +1,11 @@
+mod rag;
 mod tools;
 
 use axum::{
     extract::{Query, State},
     http::StatusCode,
     response::Json,
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use chrono::Utc;
@@ -28,13 +29,15 @@ use walkdir::WalkDir;
 #[derive(Clone)]
 pub struct AppState {
     files: Arc<RwLock<Vec<FileEntry>>>,
-    index: Arc<RwLock<TantivyIndex>>,
+    pub index: Arc<RwLock<TantivyIndex>>,
     pub repo_root: PathBuf,
+    pub model: Arc<rag::model::ModelServer>,
+    pub embeddings: Arc<RwLock<rag::embeddings::EmbeddingIndex>>,
 }
-struct TantivyIndex {
-    index: Index,
-    writer: std::sync::Mutex<IndexWriter>,
-    schema: Schema,
+pub struct TantivyIndex {
+    pub index: Index,
+    pub writer: std::sync::Mutex<IndexWriter>,
+    pub schema: Schema,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -515,6 +518,17 @@ fn start_file_watcher(state: Arc<AppState>) {
 
                         *state_clone.files.write().unwrap() = files;
                         info!("Files rescanned + reindexed: {} files", count);
+
+                        // Rebuild dense embeddings in a fresh thread so this
+                        // watcher thread (blocking recv loop) stays responsive.
+                        {
+                            let embeddings = state_clone.embeddings.clone();
+                            let root = repo_root.clone();
+                            std::thread::spawn(move || {
+                                let mut idx = embeddings.write().unwrap();
+                                idx.build(&root);
+                            });
+                        }
                     }
                 }
                 Ok(Err(e)) => warn!("File watcher error: {e}"),
@@ -582,14 +596,59 @@ async fn main() {
         schema,
     };
 
+    // Load the local LLM configuration (model path + flags, user-editable).
+    let model_config = match rag::config::ModelConfig::load(&repo_root) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            warn!("RAG chat disabled: {e}");
+            // A minimal placeholder config so the server still boots; the
+            // chat endpoint reports it as unreachable.
+            rag::config::ModelConfig {
+                binary: String::new(),
+                model: String::new(),
+                api_base: String::from("http://127.0.0.1:8080"),
+                flags: Vec::new(),
+                request: rag::config::RequestSettings {
+                    enable_thinking: false,
+                    temperature: 0.2,
+                    max_tokens: 800,
+                    connect_timeout_secs: 10,
+                },
+            }
+        }
+    };
+
     let state = Arc::new(AppState {
         files: Arc::new(RwLock::new(files)),
         index: Arc::new(RwLock::new(tantivy_index)),
         repo_root,
+        model: Arc::new(rag::model::ModelServer::new(model_config)),
+        embeddings: Arc::new(RwLock::new(rag::embeddings::EmbeddingIndex::new())),
     });
 
     // Start file watcher
     start_file_watcher(state.clone());
+
+    // Build the dense-embedding index on a background thread (model download +
+    // inference is blocking and can take a while on first run). Until it's
+    // ready, chat retrieval falls back to BM25 only.
+    {
+        let embeddings = state.embeddings.clone();
+        let root = state.repo_root.clone();
+        std::thread::spawn(move || {
+            let mut idx = embeddings.write().unwrap();
+            idx.build(&root);
+        });
+    }
+
+    // Start (or reuse) the local llama-server for RAG chat, without blocking
+    // server startup — the model load can take a few seconds.
+    {
+        let model = state.model.clone();
+        tokio::spawn(async move {
+            model.ensure_running().await;
+        });
+    }
 
     // Restrict CORS to local origins — this tool can read local files / run
     // scanners, so never let arbitrary web pages read API responses.
@@ -604,14 +663,55 @@ async fn main() {
         .route("/api/file", get(get_file))
         .route("/api/search", get(search_files))
         .route("/api/stats", get(get_stats))
+        .route("/api/chat", post(rag::chat::chat))
+        .route("/api/chat/stream", post(rag::chat::chat_stream))
+        .route("/api/chat/status", get(rag::chat::model_status))
         .merge(tools::routes())
         .layer(cors)
-        .with_state(state)
+        .with_state(state.clone())
         .fallback_service(ServeDir::new("frontend").append_index_html_on_directories(true));
 
     let addr = "0.0.0.0:3000";
     info!("Server starting on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap();
+
+    // Normal shutdown: the server has stopped accepting/draining requests, so
+    // now stop the llama-server we spawned (no orphaned process left behind).
+    state.model.shutdown();
+    info!("Server stopped");
+}
+
+/// Waits for Ctrl+C (SIGINT) or SIGTERM. The model server is shut down after
+/// axum finishes draining in-flight requests.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            info!("Received Ctrl+C, shutting down…");
+        }
+        _ = terminate => {
+            info!("Received SIGTERM, shutting down…");
+        }
+    }
 }

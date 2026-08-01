@@ -1,0 +1,49 @@
+# ── Vault LLM model configuration ───────────────────────────────────────────
+# Edit THIS file to switch models, flags, or the serving backend.
+# The Vault server reads it at startup; restart the server after changes.
+#
+# Rules:
+#   * `binary`   — path to llama-server (or any OpenAI-compatible server binary)
+#   * `model`    — path to the GGUF file
+#   * `flags`    — extra llama-server flags (see below for common ones)
+#   * `api_base` — where the server will listen; must match the `--port` flag
+#   * `request`  — per-request settings sent to the chat completions endpoint
+#
+# To switch to a different model: change `model`, and add/remove `--ctx-size`
+# as needed. Everything else stays the same.
+# ─────────────────────────────────────────────────────────────────────────────
+
+binary = "/Users/secop/Documents/VisualStudio/llama.cpp/build/bin/llama-server"
+model  = "/Users/secop/Documents/VisualStudio/openllm/models/Qwen/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf"
+
+# Host/port the model server listens on (must match --host/--port in flags).
+api_base = "http://127.0.0.1:8080"
+
+# llama-server flags.
+# Common ones:
+#   --ctx-size N          context window in tokens (Qwen3.5-9B: 8192–32768)
+#   --n-gpu-layers N      0 = CPU only (safe), high numbers offload to Metal
+#   --parallel N          concurrent request slots (each = its own KV cache)
+#   --threads N           CPU threads for prompt processing
+#   --mlock               keep model in RAM (faster, uses more memory)
+#   --no-mmap             disable memory mapping (slower load, less swap risk)
+#   --chat-template qwen3  force a chat template if auto-detect fails
+flags = [
+  "--ctx-size", "8192",
+  "--n-gpu-layers", "0",
+  "--parallel", "1",
+  "--host", "127.0.0.1",
+  "--port", "8080",
+]
+
+# Per-request chat settings.
+[request]
+# Qwen3.x is a reasoning model by default (writes a hidden CoT before the
+# answer). Set false for fast, direct answers — recommended for a RAG chat.
+enable_thinking = false
+# Higher = more creative/verbose; lower = more factual (good for RAG).
+temperature = 0.2
+# Keep answers grounded in retrieved chunks.
+max_tokens = 800
+# Fail fast if the model server is unreachable.
+connect_timeout_secs = 10

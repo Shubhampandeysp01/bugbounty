@@ -2,10 +2,11 @@
 
 > A curated security-research library **plus** a local web app for running recon & scanning tools. Built-in full-text search, a modular tool system, and no external SaaS.
 
-Two paths in one UI:
+Three paths in one UI:
 
 1. **Learn** — searchable guides, references, and case studies
 2. **Tools** — live scanners (recon, WordPress, web, local files)
+3. **Ask** — chat with your library via a local LLM (RAG)
 
 ---
 
@@ -30,12 +31,22 @@ Two paths in one UI:
 - Builds a **Tantivy full-text index** of all `*.md` files at startup; a `notify` file watcher re-indexes on edits (thread-based, debounced).
 - `/api/tree`, `/api/file`, `/api/search`, `/api/stats` — knowledge layer.
 - `/api/tools/*` — one route per tool, merged from `tools::routes()`.
+- `/api/chat` — RAG chat: retrieves the top matching chunks from the index, grounds a local LLM on them, and returns the answer + sources.
 - **CORS is locked to `http://localhost:3000` / `127.0.0.1`** — the API can read local files and run scanners, so no arbitrary web page may call it.
 
 **Frontend** (`frontend/`, vanilla JS, no build step):
-- `app.js` — SPA routing (history-aware `nav()`), sidebar tree, ⌘K/Ctrl-K search, tool panes.
+- `app.js` — SPA routing (history-aware `nav()`), sidebar tree, ⌘K/Ctrl-K search, tool panes, Ask chat panel.
 - `tools/registry.js` — single source of truth for tool catalog (categories, inputs, endpoints).
 - `tools/runners.js` — per-tool result renderers.
+
+**RAG layer** (`server/src/rag/`): the Ask path answers questions against your library.
+- **Hybrid retrieval**: BM25 over the Tantivy index (lexical) **merged with dense semantic embeddings** (BGE-small-en-v1.5 via `fastembed`, ONNX, fully local) using Reciprocal Rank Fusion — dense hits rank highly even when the question has no shared vocabulary with the docs.
+- **Cross-encoder reranking**: the RRF-merged candidates are re-scored against the question by a `bge-reranker-base` cross-encoder (`fastembed`), so the most relevant chunks win the final top-k — and the displayed source scores match the ranking.
+- **Streaming answers**: the Ask panel renders the model's reply token-by-token via Server-Sent Events (`POST /api/chat/stream`), so you see the answer as it's generated while source chips appear immediately.
+- **Markdown chunking** (`embeddings.rs`): heading-aware splitting (~900 chars, overlapping) so long guides become focused retrievable sections; the embedding index builds in the background at startup and rebuilds on file change (cache: `.embedding_cache/`, gitignored).
+- **Exact token budgeting**: before generation the prompt is packed to the model's context window using the running tokenizer's own `/tokenize` (binary search on chunk length) so context never overflows `--ctx-size` and output tokens are reserved.
+- `server/rag/model_config.toml` is **the single file that controls the local LLM** — binary path, model GGUF, flags, and per-request settings. Edit it to switch models; the server auto-spawns the model server at startup (or reuses one already running) and the chat endpoint reports 503 until it's ready.
+- Generation runs via any **OpenAI-compatible server** (llama.cpp `llama-server` is the default) and is disabled gracefully if no config/model is available.
 
 **Tool layer** (`server/src/tools/`): each tool is **one module + one route + one registry entry** — modular by design, so tools can be deleted without touching the rest (see `tools/DELETE.md`).
 
@@ -60,12 +71,17 @@ bugbounty/
 │   └── tools/registry.js        ← tool catalog
 │       tools/runners.js         ← result renderers
 ├── server/                      ← Rust API (axum + tantivy)
-│   └── src/
-│       ├── main.rs              ← knowledge layer + watcher
-│       └── tools/               ← one module per tool
-│           ├── common.rs        ← HTTP client, run_cli, validation
-│           ├── status.rs        ← install-status catalog
-│           └── <tool>.rs        ← per-tool handlers
+│   ├── src/
+│   │   ├── main.rs              ← knowledge layer + watcher
+│   │   ├── rag/                 ← Ask / RAG chat (model config + endpoint)
+│   │   │   ├── model_config.toml ← ✎ EDIT THIS to switch model/flags
+│   │   │   ├── config.rs        ← TOML parser
+│   │   │   ├── model.rs         ← spawn/health-check llama-server
+│   │   │   └── chat.rs          ← retrieve + ground + answer
+│   │   └── tools/               ← one module per tool
+│   │       ├── common.rs        ← HTTP client, run_cli, validation
+│   │       ├── status.rs        ← install-status catalog
+│   │       └── <tool>.rs        ← per-tool handlers
 ├── tools/
 │   ├── README.md / DELETE.md    ← install notes / removal guide
 │   ├── wordlists/               ← default ffuf list
@@ -83,6 +99,19 @@ cd bugbounty
 cd server && cargo build --release && cd ..   # build (first time / after changes)
 ./start.sh                                    # serves http://localhost:3000
 ```
+
+**Ask (RAG) needs a local LLM.** Point `server/rag/model_config.toml` at a GGUF model + a llama.cpp `llama-server` binary, then start the vault — it auto-spawns the model server on port 8080 (or reuses one already running). The Ask panel shows the model status, and chat returns 503 with a hint until the model finishes loading.
+
+**Model lifecycle:** the vault shuts the llama-server down when it exits — on Ctrl+C (SIGINT) or SIGTERM it drains in-flight requests, then stops the model server it spawned (no orphaned processes). If you started llama-server yourself, it is reused and left running.
+
+```toml
+# server/rag/model_config.toml  (defaults already set for Qwen3.5-9B)
+binary = "/path/to/llama.cpp/build/bin/llama-server"
+model  = "/path/to/Qwen3.5-9B-Q4_K_M.gguf"
+flags  = ["--ctx-size", "8192", "--n-gpu-layers", "0", ...]
+```
+
+> **Qwen3.x tip:** those models are reasoning models — the config sets `enable_thinking = false` for fast, direct RAG answers. Raise `temperature` for creative answers, lower `max_tokens` to keep them short.
 
 Optional CLI tools (the recon trio is Go-based):
 
@@ -116,6 +145,13 @@ go install github.com/projectdiscovery/katana/cmd/katana@latest
 - `/api/stats` — file counts by category.
 
 Suggested learning path lives in `guides/` (methodology → web appsec → exploitation → cloud/mobile/kernel). WordPress-specific track in `guides/wordpress/`.
+
+### Ask / RAG chat
+
+- Chat with your library: question → **hybrid retrieval** (BM25 + dense embeddings, RRF merge) + **cross-encoder rerank** over the index → grounded prompt → **streaming** local LLM answer with **clickable source citations**.
+- Heading-aware chunking + exact token budgeting so long docs fit the model's context window without overflow.
+- One editable config file (`server/rag/model_config.toml`) controls the model: binary, GGUF path, flags, temperature, max tokens, thinking mode.
+- Works with **any OpenAI-compatible server** (llama.cpp `llama-server` by default); auto-spawns it, reuses an existing instance, and degrades to a clear 503 if the model isn't available.
 
 ### Tool layer
 
@@ -183,15 +219,19 @@ Suggested learning path lives in `guides/` (methodology → web appsec → explo
 ## API summary
 
 ```
-GET /api/tree           knowledge tree
-GET /api/file?path=..   rendered markdown
-GET /api/search?q=..    full-text search
-GET /api/stats          file counts
-GET /api/tools/status   install status of every tool
-GET /api/tools/<tool>?<input>   run a tool (see registry for params)
+GET  /api/tree           knowledge tree
+GET  /api/file?path=..   rendered markdown
+GET  /api/search?q=..    full-text search
+GET  /api/stats          file counts
+POST /api/chat           RAG chat: {"message": "...", "limit": 5}
+GET  /api/chat/status    model server health: {"ready": true, ...}
+GET  /api/tools/status   install status of every tool
+GET  /api/tools/<tool>?<input>   run a tool (see registry for params)
 ```
 
 Example: `curl -s "http://localhost:3000/api/tools/subfinder?url=example.com" | jq`
+
+Example chat: `curl -s -X POST http://localhost:3000/api/chat -H 'Content-Type: application/json' -d '{"message":"How does EternalBlue work?"}' | jq
 
 ---
 

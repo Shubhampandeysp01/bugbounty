@@ -30,8 +30,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Utilities
 walkdir = "2"
 chrono = "0.4"
-reqwest = { version = "0.13.4", features = ["json"] }
+reqwest = { version = "0.13.4", features = ["json", "stream"] }
 regex = "1"
+toml = "0.8"
+futures-util = "0.3"
+tokio-stream = "0.1"
+
+# Dense embeddings for hybrid RAG retrieval
+fastembed = { version = "5.17.4", default-features = false, features = ["hf-hub-native-tls", "ort-download-binaries"] }
 
 [profile.release]
 opt-level = 3

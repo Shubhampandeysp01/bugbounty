@@ -19,6 +19,7 @@ dist/
 build/
 out/
 .search_index/
+.embedding_cache/
 server/target/
 
 # Environment

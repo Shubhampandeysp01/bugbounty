@@ -4,7 +4,7 @@ const state = {
   currentFile: null,
   sidebarOpen: true,
   rawViewerOpen: false,
-  mode: 'learn', // 'learn' | 'tools' | 'home'
+  mode: 'learn', // 'learn' | 'tools' | 'ask' | 'home'
   toolStatus: {},
 };
 
@@ -35,6 +35,12 @@ const dom = {
   countCaseStudies: $('#count-case-studies'),
   toolsPanel: $('#tools-panel'),
   toolsNav: $('#tools-nav'),
+  askView: $('#ask-view'),
+  askThread: $('#ask-thread'),
+  askForm: $('#ask-form'),
+  askInput: $('#ask-input'),
+  askSend: $('#ask-send'),
+  askModelStatus: $('#ask-model-status'),
   learnEmpty: $('#learn-empty'),
   countTools: $('#count-tools'),
   modeSwitcher: $('.mode-switcher'),
@@ -73,6 +79,70 @@ const api = {
   async getStats() {
     const res = await fetch('/api/stats');
     return res.json();
+  },
+  async chat(message, limit = 5) {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, limit }),
+    });
+    if (!res.ok) {
+      let detail = await res.text();
+      try { detail = JSON.parse(detail).message || detail; } catch {}
+      throw new Error(detail);
+    }
+    return res.json();
+  },
+  /**
+   * Streams a chat response via SSE. `onSources` is called with the retrieved
+   * chunks, `onDelta` with each text fragment, and the promise resolves when
+   * the stream finishes (or rejects on error).
+   */
+  async chatStream(message, limit = 5, onSources, onDelta) {
+    const res = await fetch('/api/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, limit }),
+    });
+    if (!res.ok) {
+      let detail = await res.text();
+      try { detail = JSON.parse(detail).message || detail; } catch {}
+      throw new Error(detail);
+    }
+    if (!res.body) throw new Error('Streaming not supported by this browser');
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let done = false;
+    while (!done) {
+      const { value, done: streamDone } = await reader.read();
+      done = streamDone;
+      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+      // Extract complete SSE events ("\n\n"-separated).
+      let idx;
+      while ((idx = buffer.indexOf('\n\n')) !== -1) {
+        const raw = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const lines = raw.split('\n').filter(Boolean);
+        let event = 'message';
+        const dataLines = [];
+        for (const line of lines) {
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+        }
+        const data = dataLines.join('\n');
+        if (event === 'sources') {
+          try { onSources(JSON.parse(data).sources); } catch {}
+        } else if (event === 'delta') {
+          onDelta(data);
+        } else if (event === 'error') {
+          throw new Error(data);
+        } else if (event === 'done') {
+          return;
+        }
+      }
+    }
   },
 };
 
@@ -135,7 +205,9 @@ function setMode(mode, { push = true } = {}) {
   }
 
   // Open sidebar when entering a path (desktop); mobile stays user-controlled
-  if (mode !== 'home' && !state.sidebarOpen && !isMobileLayout()) {
+  if (mode === 'ask') {
+    closeSidebar();
+  } else if (mode !== 'home' && !state.sidebarOpen && !isMobileLayout()) {
     openSidebar();
   }
 
@@ -145,6 +217,8 @@ function setMode(mode, { push = true } = {}) {
     nav('?mode=learn', { mode: 'learn' });
   } else if (push && mode === 'tools') {
     nav('?mode=tools', { mode: 'tools' });
+  } else if (push && mode === 'ask') {
+    nav('?mode=ask', { mode: 'ask' });
   }
 }
 
@@ -153,6 +227,7 @@ function hideAllViews() {
   dom.reader.classList.add('hidden');
   dom.rawViewer.classList.add('hidden');
   dom.toolsPanel.classList.add('hidden');
+  if (dom.askView) dom.askView.classList.add('hidden');
   if (dom.learnEmpty) dom.learnEmpty.classList.add('hidden');
   if (dom.vulnDetail) dom.vulnDetail.classList.add('hidden');
 }
@@ -203,6 +278,17 @@ function enterToolsPath({ push = true, toolId = null } = {}) {
   }
 }
 
+function enterAskPath({ push = true } = {}) {
+  setMode('ask', { push });
+  hideAllViews();
+  toolItems().forEach((el) => el.classList.remove('active'));
+  $$('.tree-node-header.active').forEach((el) => el.classList.remove('active'));
+  if (dom.askView) {
+    dom.askView.classList.remove('hidden');
+    dom.askInput.focus();
+  }
+}
+
 // Mode switcher clicks
 dom.modeBtns.forEach((btn) => {
   btn.addEventListener('click', () => {
@@ -211,6 +297,8 @@ dom.modeBtns.forEach((btn) => {
       enterLearnPath({ push: true });
     } else if (mode === 'tools') {
       enterToolsPath({ push: true });
+    } else if (mode === 'ask') {
+      enterAskPath({ push: true });
     }
   });
 });
@@ -967,6 +1055,187 @@ async function loadToolStatus() {
   }
 }
 
+// ─── Ask / RAG Chat ────────────────────────────────────────────────────────
+async function checkModelStatus() {
+  if (!dom.askModelStatus) return;
+  try {
+    const res = await fetch('/api/chat/status');
+    if (!res.ok) {
+      dom.askModelStatus.textContent = 'Model offline';
+      dom.askModelStatus.classList.add('offline');
+      return;
+    }
+    const data = await res.json();
+    if (data.ready) {
+      dom.askModelStatus.textContent = 'Model ready';
+      dom.askModelStatus.classList.remove('offline');
+    } else {
+      dom.askModelStatus.textContent = 'Model loading…';
+      dom.askModelStatus.classList.add('offline');
+    }
+  } catch {
+    dom.askModelStatus.textContent = 'Model offline';
+    dom.askModelStatus.classList.add('offline');
+  }
+}
+
+function addChatMessage(role, html) {
+  const el = document.createElement('div');
+  el.className = `ask-msg ${role === 'user' ? 'ask-user' : 'ask-assistant'}`;
+  el.innerHTML = html;
+  dom.askThread.appendChild(el);
+  dom.askThread.scrollTop = dom.askThread.scrollHeight;
+  return el;
+}
+
+function formatSources(sources) {
+  if (!sources || !sources.length) return '';
+  const items = sources
+    .map(
+      (s) =>
+        `<a class="ask-source" href="#" data-path="${encodeURIComponent(s.path)}" title="${escapeUi(s.path)}">
+          <span class="ask-source-file">📄</span> ${escapeUi(s.title || s.path)}
+        </a>`
+    )
+    .join('');
+  return `<div class="ask-sources"><span class="ask-sources-label">Sources:</span>${items}</div>`;
+}
+
+function mdToHtml(md) {
+  const escaped = String(md ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  // Minimal markdown → HTML (headings, bold, inline code, lists, paragraphs).
+  const lines = escaped.split('\n');
+  const out = [];
+  let inList = false;
+  for (let line of lines) {
+    const h = line.match(/^(#{1,4})\s+(.*)/);
+    if (h) {
+      if (inList) { out.push('</ul>'); inList = false; }
+      const lvl = h[1].length;
+      out.push(`<h${lvl + 1}>${h[2]}</h${lvl + 1}>`);
+      continue;
+    }
+    const li = line.match(/^\s*[-*]\s+(.*)/);
+    if (li) {
+      if (!inList) { out.push('<ul>'); inList = true; }
+      out.push(`<li>${li[1]}</li>`);
+      continue;
+    }
+    if (inList) { out.push('</ul>'); inList = false; }
+    if (!line.trim()) continue;
+    const bolded = line.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\*(.+?)\*/g, '<em>$1</em>');
+    const coded = bolded.replace(/`([^`]+)`/g, '<code>$1</code>');
+    out.push(`<p>${coded}</p>`);
+  }
+  if (inList) out.push('</ul>');
+  return out.join('\n');
+}
+
+function bindSourceClick() {
+  $$('.ask-source').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      e.preventDefault();
+      const path = decodeURIComponent(el.dataset.path || '');
+      if (path) {
+        loadFile(path);
+        if (isMobileLayout()) closeSidebar();
+      }
+    });
+  });
+}
+
+let askBusy = false;
+
+async function handleAskSubmit(e) {
+  if (e) e.preventDefault();
+  const text = dom.askInput.value.trim();
+  if (!text || askBusy) return;
+
+  const emptyEl = dom.askThread.querySelector('.ask-empty');
+  if (emptyEl) emptyEl.remove();
+
+  addChatMessage('user', escapeUi(text).replace(/\n/g, '<br>'));
+
+  const assistantEl = addChatMessage('assistant', `
+    <div class="ask-answer ask-streaming"><span class="ask-stream-caret"></span></div>
+    <div class="ask-sources"></div>`);
+  dom.askInput.value = '';
+  dom.askInput.style.height = 'auto';
+  askBusy = true;
+  dom.askSend.disabled = true;
+
+  const answerEl = assistantEl.querySelector('.ask-answer');
+  const sourcesEl = assistantEl.querySelector('.ask-sources');
+  let fullText = '';
+  let sources = [];
+
+  // Throttle markdown re-rendering so the model can stream smoothly.
+  let renderTimer = null;
+  const scheduleRender = () => {
+    if (renderTimer) return;
+    renderTimer = setTimeout(() => {
+      renderTimer = null;
+      answerEl.innerHTML = mdToHtml(fullText) + '<span class="ask-stream-caret"></span>';
+      dom.askThread.scrollTop = dom.askThread.scrollHeight;
+    }, 80);
+  };
+  const renderNow = () => {
+    if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
+    answerEl.innerHTML = mdToHtml(fullText);
+  };
+
+  try {
+    await api.chatStream(
+      text, 5,
+      (src) => {
+        sources = src;
+        sourcesEl.innerHTML = formatSources(src);
+        bindSourceClick();
+      },
+      (delta) => {
+        fullText += delta;
+        scheduleRender();
+      }
+    );
+    renderNow();
+    answerEl.classList.remove('ask-streaming');
+  } catch (err) {
+    renderNow();
+    answerEl.classList.remove('ask-streaming');
+    if (!fullText) {
+      assistantEl.innerHTML = `<div class="ask-error">${escapeUi(err.message)}</div>`;
+    } else {
+      const errEl = document.createElement('div');
+      errEl.className = 'ask-error';
+      errEl.textContent = err.message;
+      assistantEl.appendChild(errEl);
+    }
+  } finally {
+    askBusy = false;
+    dom.askSend.disabled = false;
+    dom.askInput.focus();
+    dom.askThread.scrollTop = dom.askThread.scrollHeight;
+  }
+}
+
+// Ask events
+if (dom.askForm) {
+  dom.askForm.addEventListener('submit', handleAskSubmit);
+  dom.askInput.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      handleAskSubmit();
+    }
+  });
+  dom.askInput.addEventListener('input', () => {
+    dom.askInput.style.height = 'auto';
+    dom.askInput.style.height = Math.min(dom.askInput.scrollHeight, 160) + 'px';
+  });
+}
+
 // ─── Keyboard Shortcuts ────────────────────────────────────────────────────
 document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -1005,6 +1274,8 @@ window.addEventListener('popstate', (e) => {
     enterLearnPath({ push: false });
   } else if (e.state && e.state.mode === 'tools') {
     enterToolsPath({ push: false });
+  } else if (e.state && e.state.mode === 'ask') {
+    enterAskPath({ push: false });
   } else {
     // Treat as home without double push
     state.currentFile = null;
@@ -1029,6 +1300,7 @@ async function init() {
   // Build tools UI from registry (works even if status API fails)
   await loadToolStatus();
   buildToolsUI();
+  checkModelStatus();
 
   try {
     const stats = await api.getStats();
@@ -1064,6 +1336,8 @@ async function init() {
       enterToolsPath({ push: false });
     } else if (mode === 'learn') {
       enterLearnPath({ push: false });
+    } else if (mode === 'ask') {
+      enterAskPath({ push: false });
     }
 
     // Deep-link handling is done; subsequent navigation must push new entries.
