@@ -2,6 +2,7 @@ use crate::rag::config::ModelConfig;
 use futures_util::StreamExt;
 use serde_json::json;
 use std::process::{Child, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -18,6 +19,9 @@ pub struct ModelServer {
     /// The llama-server process we spawned, if any. Only this is killed on
     /// shutdown; reused instances are left alone.
     spawned: Arc<Mutex<Option<Child>>>,
+    /// True while a manual `start()` is still waiting for the model to load.
+    /// Lets the UI show "Starting…" between the click and readiness.
+    starting: Arc<AtomicBool>,
 }
 
 impl ModelServer {
@@ -31,6 +35,7 @@ impl ModelServer {
             config,
             client,
             spawned: Arc::new(Mutex::new(None)),
+            starting: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -41,6 +46,35 @@ impl ModelServer {
             Ok(resp) => resp.status().is_success(),
             Err(_) => false,
         }
+    }
+
+    /// True if we spawned the model process ourselves (so we can stop it).
+    /// Externally-launched (reused) instances return false.
+    pub fn is_managed(&self) -> bool {
+        self.spawned.lock().unwrap().is_some()
+    }
+
+    /// True while a manual start is waiting for the model to finish loading.
+    pub fn is_starting(&self) -> bool {
+        self.starting.load(Ordering::SeqCst)
+    }
+
+    /// Validates the config file points at a real binary + model file, so a
+    /// manual start fails fast instead of hanging on a dead spawn.
+    pub fn validate_launch(&self) -> Result<(), String> {
+        if !std::path::Path::new(&self.config.binary).is_file() {
+            return Err(format!(
+                "Model binary not found: {} (check server/rag/model_config.toml)",
+                self.config.binary
+            ));
+        }
+        if !std::path::Path::new(&self.config.model).is_file() {
+            return Err(format!(
+                "Model file not found: {} (check server/rag/model_config.toml)",
+                self.config.model
+            ));
+        }
+        Ok(())
     }
 
     /// Spawns llama-server as a child process with the flags from the config
@@ -60,8 +94,9 @@ impl ModelServer {
             Ok(child) => {
                 let pid = child.id();
                 *self.spawned.lock().unwrap() = Some(child);
-                // Monitor thread: when llama-server exits (crash or kill),
-                // clear the handle so shutdown doesn't try to kill it again.
+                // Monitor thread: when llama-server exits (crash, kill, or a
+                // manual `stop()`), clear the handle so shutdown doesn't try
+                // to kill it again. Breaks once the handle is gone.
                 let spawned = self.spawned.clone();
                 std::thread::spawn(move || loop {
                     std::thread::sleep(Duration::from_secs(2));
@@ -76,7 +111,7 @@ impl ModelServer {
                                 *guard = None;
                                 true
                             }
-                            None => false,
+                            None => guard.is_none(),
                         }
                     };
                     if exited {
@@ -85,6 +120,38 @@ impl ModelServer {
                 });
             }
             Err(e) => warn!("Failed to spawn model server: {e}"),
+        }
+    }
+
+    /// Manually starts the model server in the background (spawns + waits for
+    /// it to load). Used by the "Start model" button. Returns immediately;
+    /// the `is_starting()` flag stays true until the model is ready (or failed).
+    pub async fn start(&self) -> Result<String, String> {
+        self.validate_launch()?;
+        if self.is_healthy().await {
+            return Ok("already running".into());
+        }
+        if self.is_starting() {
+            return Ok("already starting".into());
+        }
+        self.starting.store(true, Ordering::SeqCst);
+        let this = self.clone();
+        tokio::spawn(async move {
+            this.ensure_running().await;
+            this.starting.store(false, Ordering::SeqCst);
+        });
+        Ok("starting".into())
+    }
+
+    /// Stops the model server we spawned (the "Stop model" button). Returns
+    /// true if a process was killed; reused external instances are untouched.
+    pub fn stop(&self) -> bool {
+        self.starting.store(false, Ordering::SeqCst);
+        if self.is_managed() {
+            self.shutdown();
+            true
+        } else {
+            false
         }
     }
 

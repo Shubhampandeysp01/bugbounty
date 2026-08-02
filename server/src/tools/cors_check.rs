@@ -3,12 +3,18 @@
 //! `Access-Control-Allow-Origin` / `Access-Control-Allow-Credentials` responses.
 //! DELETE this file + route + frontend registry to remove.
 
-use axum::{extract::Query, http::StatusCode, response::Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::Json,
+};
 use reqwest::Client;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::common::{http_client, normalize_url};
+use crate::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct CorsTest {
@@ -110,9 +116,12 @@ async fn run_test(
     })
 }
 
-pub async fn cors_check(
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<CorsResponse>, (StatusCode, String)> {
+/// Job-Manager contract: the long-running work behind `cors_check`. Takes
+/// params (not `Query`) and returns an axum-style error so the Job Manager and
+/// the legacy endpoint share one implementation.
+pub async fn cors_check_core(
+    params: &HashMap<String, String>,
+) -> Result<CorsResponse, (StatusCode, String)> {
     let started = std::time::Instant::now();
     let url = params
         .get("url")
@@ -166,7 +175,7 @@ pub async fn cors_check(
         .any(|t| t.verdict == "critical" || t.verdict == "high");
     let medium_risk = !high_risk && tests.iter().any(|t| t.verdict == "medium");
 
-    Ok(Json(CorsResponse {
+    Ok(CorsResponse {
         url: target,
         installed: true,
         tests,
@@ -175,5 +184,14 @@ pub async fn cors_check(
         error,
         duration_ms: started.elapsed().as_millis() as u64,
         command: "builtin (native HTTP, 6 origin probes)".into(),
-    }))
+    })
+}
+
+pub async fn cors_check(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    Ok(Json(
+        crate::jobs::run_sync(&state, "cors-check", params).await?,
+    ))
 }

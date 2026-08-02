@@ -57,9 +57,28 @@
           <kbd class="search-kbd">⌘K</kbd>
           <div id="search-results" class="search-dropdown hidden"></div>
         </div>
+        <button id="jobs-toggle" class="icon-btn jobs-toggle" title="Job Center" aria-label="Open Job Center">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13" cy="6" r="2"/><path d="M5 18 14 9"/><path d="M15 6h5v5"/><path d="M6 19h5v5"/><path d="M3 14h5v5"/><path d="M18 11v5h5"/></svg>
+          <span id="jobs-badge" class="jobs-badge hidden" data-jobs-badge>0</span>
+        </button>
         <span id="stats-badge" class="stats-badge">0 files</span>
       </div>
     </header>
+
+    <!-- Job Center (slide-over) -->
+    <div id="jobs-backdrop" class="jobs-backdrop hidden" aria-hidden="true"></div>
+    <aside id="jobs-panel" class="jobs-panel hidden" aria-label="Job Center">
+      <div class="jobs-header">
+        <span class="jobs-title">Job Center</span>
+        <button id="jobs-close" class="icon-btn-sm" title="Close" aria-label="Close Job Center">✕</button>
+      </div>
+      <div class="jobs-subhead">
+        <span>Background runs · session only</span>
+        <span class="jobs-running-count mono" id="jobs-running-count"></span>
+      </div>
+      <div id="jobs-list" class="jobs-list"></div>
+    </aside>
+    <div id="toasts" class="toasts"></div>
 
     <div id="main-layout">
       <!-- Sidebar: context-aware by mode -->
@@ -216,7 +235,15 @@
             <div class="ask-hero-badge">RAG Chat</div>
             <h1 class="ask-title">Ask the Vault</h1>
             <p class="ask-subtitle">Ask questions against your library — answers are grounded in the retrieved guides, references &amp; case studies, with sources cited.</p>
-            <div id="ask-model-status" class="ask-model-status">Checking model…</div>
+            <div class="ask-model-controls">
+              <div id="ask-model-status" class="ask-model-status">Checking model…</div>
+              <button id="ask-model-start" class="btn-ghost btn-xs hidden" type="button" title="Start the local llama-server model">
+                <span>Start model</span>
+              </button>
+              <button id="ask-model-stop" class="btn-ghost btn-xs hidden" type="button" title="Stop the local llama-server model">
+                <span>Stop model</span>
+              </button>
+            </div>
           </div>
           <div id="ask-thread" class="ask-thread">
             <div class="ask-empty">
@@ -255,6 +282,7 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.0/highlight.min.js"></script>
   <script src="tools/registry.js"></script>
+  <script src="tools/jobs.js"></script>
   <script src="tools/runners.js"></script>
   <script src="app.js"></script>
 </body>

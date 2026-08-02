@@ -27,9 +27,14 @@ server/target/
 .env.local
 .env.*.local
 
+# Local machine config (holds absolute paths) — commit the .example instead
+server/rag/model_config.toml
+
 # Secrets & local vulnerability databases (never commit)
 .secrets/
 tools/data/wordfence/
+tools/data/cves/
+tools/data/findings/
 *.pem
 *.key
 

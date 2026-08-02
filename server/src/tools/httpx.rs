@@ -1,11 +1,18 @@
 //! Websites → Probe (httpx) — DELETE this file + route + frontend registry to remove.
 
-use axum::{extract::Query, http::StatusCode, response::Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::Json,
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use super::common::{normalize_url, run_cli, truncate_output};
+use super::common::{normalize_url, truncate_output, CliResult};
+use crate::jobs::CliCtx;
+use crate::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct HttpxResponse {
@@ -18,46 +25,53 @@ pub struct HttpxResponse {
     pub command: String,
 }
 
-pub async fn httpx_probe(
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<HttpxResponse>, (StatusCode, String)> {
+/// Job-Manager contract: build the CLI argument vector from tool params.
+pub fn build_args(_ctx: &CliCtx, params: &HashMap<String, String>) -> Result<Vec<String>, String> {
+    let target = target_from_params(params)?;
+    // httpx: status, title, tech, server — JSONL (use short flags for v1.10+)
+    Ok(vec![
+        "-u".into(),
+        target,
+        "-silent".into(),
+        "-json".into(),
+        "-sc".into(),
+        "-title".into(),
+        "-td".into(),
+        "-server".into(),
+        "-cl".into(),
+        "-ip".into(),
+        "-timeout".into(),
+        "12".into(),
+        "-nc".into(),
+    ])
+}
+
+fn target_from_params(params: &HashMap<String, String>) -> Result<String, String> {
     let url = params
         .get("url")
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing 'url' parameter".to_string()))?;
-    let target = normalize_url(url).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .ok_or_else(|| "Missing 'url' parameter".to_string())?;
+    normalize_url(url)
+}
 
-    // httpx: status, title, tech, server — JSONL (use short flags for v1.10+)
-    let result = run_cli(
-        "httpx",
-        &[
-            "-u",
-            &target,
-            "-silent",
-            "-json",
-            "-sc",
-            "-title",
-            "-td",
-            "-server",
-            "-cl",
-            "-ip",
-            "-timeout",
-            "12",
-            "-nc",
-        ],
-        60,
-    )
-    .await;
+/// Job-Manager contract: turn a `CliResult` into the renderer's JSON.
+pub fn parse_output(
+    _ctx: &CliCtx,
+    params: &HashMap<String, String>,
+    result: &CliResult,
+) -> Result<serde_json::Value, String> {
+    let target = target_from_params(params)?;
 
     if !result.installed {
-        return Ok(Json(HttpxResponse {
+        return serde_json::to_value(HttpxResponse {
             url: target,
             installed: false,
             findings: vec![],
             raw: String::new(),
-            error: result.error,
+            error: result.error.clone(),
             duration_ms: result.duration_ms,
-            command: result.command,
-        }));
+            command: result.command.clone(),
+        })
+        .map_err(|e| e.to_string());
     }
 
     let mut findings = Vec::new();
@@ -87,13 +101,23 @@ pub async fn httpx_probe(
         None
     };
 
-    Ok(Json(HttpxResponse {
+    serde_json::to_value(HttpxResponse {
         url: target,
         installed: true,
         findings,
         raw: truncate_output(&result.stdout, 20_000),
         error: err,
         duration_ms: result.duration_ms,
-        command: result.command,
-    }))
+        command: result.command.clone(),
+    })
+    .map_err(|e| e.to_string())
+}
+
+pub async fn httpx_probe(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    Ok(Json(
+        crate::jobs::run_sync(&state, "httpx-probe", params).await?,
+    ))
 }

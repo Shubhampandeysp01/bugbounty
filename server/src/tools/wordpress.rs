@@ -147,5 +147,6 @@ pub async fn wordpress_check(
         result.detected = true;
     }
 
+    super::result_cache::store("wordpress-check", &base_url, &result);
     Ok(Json(result))
 }

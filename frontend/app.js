@@ -41,6 +41,8 @@ const dom = {
   askInput: $('#ask-input'),
   askSend: $('#ask-send'),
   askModelStatus: $('#ask-model-status'),
+  askModelStart: $('#ask-model-start'),
+  askModelStop: $('#ask-model-stop'),
   learnEmpty: $('#learn-empty'),
   countTools: $('#count-tools'),
   modeSwitcher: $('.mode-switcher'),
@@ -56,6 +58,10 @@ const dom = {
   vulnDetailBadge: $('#vuln-detail-badge'),
   vulnDetailBody: $('#vuln-detail-body'),
   vulnDetailCveExt: $('#vuln-detail-cve-ext'),
+  jobsToggle: $('#jobs-toggle'),
+  jobsClose: $('#jobs-close'),
+  jobsBackdrop: $('#jobs-backdrop'),
+  jobsPanel: $('#jobs-panel'),
 };
 
 // Live NodeList helpers (tools are built dynamically)
@@ -286,6 +292,7 @@ function enterAskPath({ push = true } = {}) {
   if (dom.askView) {
     dom.askView.classList.remove('hidden');
     dom.askInput.focus();
+    checkModelStatus();
   }
 }
 
@@ -952,6 +959,281 @@ if (dom.toolsPanel) {
   });
 }
 
+// Lazy component intelligence inside expandable Plugin/Theme Enum cards.
+// First expand fetches /api/tools/component-intel and renders the enriched body.
+if (dom.toolsPanel) {
+  dom.toolsPanel.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-comp-toggle]');
+    if (!btn) return;
+    e.preventDefault();
+    const card = btn.closest('[data-comp-card]');
+    const body = card.querySelector('[data-comp-body]');
+    const wasOpen = !body.hidden;
+    body.hidden = wasOpen;
+    card.classList.toggle('open', !wasOpen);
+    if (wasOpen || card.dataset.compLoaded === '1') return;
+    card.dataset.compLoaded = '1';
+    body.innerHTML =
+      '<div class="comp-loading"><span class="job-run-spinner"></span> Loading intelligence…</div>';
+    const q = new URLSearchParams({
+      type: card.dataset.compType,
+      slug: card.dataset.compSlug,
+    });
+    if (card.dataset.compVersion) q.set('version', card.dataset.compVersion);
+    fetch(`/api/tools/component-intel?${q.toString()}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (!document.body.contains(body)) return;
+        body.innerHTML = window.renderComponentIntel(data);
+      })
+      .catch((err) => {
+        if (!document.body.contains(body)) return;
+        body.innerHTML = `<div class="comp-error">Failed to load intelligence: ${escapeUi(err.message)}</div>`;
+      });
+  });
+}
+
+// ─── Attack Surface Explorer (tree, filters, refresh, run missing) ─────────
+if (dom.toolsPanel) {
+  dom.toolsPanel.addEventListener('click', (e) => {
+    const ASE = window.AttackSurfaceExplorer;
+    if (!ASE) return;
+    const toggle = e.target.closest('[data-ase-toggle]');
+    if (toggle) {
+      e.preventDefault();
+      ASE.toggleNode(toggle.dataset.node);
+      return;
+    }
+    const sev = e.target.closest('[data-ase-sev]');
+    if (sev) {
+      e.preventDefault();
+      ASE.setSeverity(sev.dataset.aseSev);
+      return;
+    }
+    const cat = e.target.closest('[data-ase-cat]');
+    if (cat) {
+      e.preventDefault();
+      ASE.setCategory(cat.dataset.aseCat);
+      return;
+    }
+    const refresh = e.target.closest('[data-ase-refresh]');
+    if (refresh) {
+      e.preventDefault();
+      ASE.refetch();
+      return;
+    }
+    const runMissing = e.target.closest('[data-ase-run-missing]');
+    if (runMissing) {
+      e.preventDefault();
+      ASE.runMissing(runMissing.dataset.aseRunMissing);
+      return;
+    }
+    const expandAll = e.target.closest('[data-ase-expand-all]');
+    if (expandAll) {
+      e.preventDefault();
+      ASE.expandAll();
+      return;
+    }
+    const collapseAll = e.target.closest('[data-ase-collapse-all]');
+    if (collapseAll) {
+      e.preventDefault();
+      ASE.collapseAll();
+    }
+  });
+}
+
+// Live search box for the Attack Surface Explorer (keeps input focus).
+if (dom.toolsPanel) {
+  dom.toolsPanel.addEventListener('input', (e) => {
+    const box = e.target.closest('[data-ase-search]');
+    if (box && window.AttackSurfaceExplorer) {
+      window.AttackSurfaceExplorer.setQuery(box.value);
+    }
+  });
+}
+
+// ─── Findings DB CRUD (tools panel delegation) ──────────────────────────────
+if (dom.toolsPanel) {
+  dom.toolsPanel.addEventListener('click', (e) => {
+    const pane = e.target.closest('.tool-pane');
+    if (!pane) return;
+    const resultsEl = pane.querySelector('[data-results]');
+    const rerun = () => {
+      const form = pane.querySelector('[data-tool-form]');
+      const spinnerEl = pane.querySelector('[data-spinner]');
+      window.VAULT_TOOL_RUNNERS.run(toolForPane(pane), form, resultsEl, spinnerEl);
+    };
+
+    const newBtn = e.target.closest('[data-finding-new]');
+    if (newBtn) {
+      e.preventDefault();
+      showFindingForm(pane, {});
+      return;
+    }
+    const saveNew = e.target.closest('[data-finding-save-new]');
+    if (saveNew) {
+      e.preventDefault();
+      const payload = readFindingForm(pane);
+      const editId = saveNew.dataset.editId;
+      const url = editId
+        ? '/api/tools/findings/' + encodeURIComponent(editId)
+        : '/api/tools/findings';
+      const method = editId ? 'PUT' : 'POST';
+      findingsFetch(url, method, payload).then((d) => {
+        if (!d.ok) {
+          alert('Save failed: ' + (d.error || 'unknown error'));
+          return;
+        }
+        hideFindingForm(pane);
+        rerun();
+      });
+      return;
+    }
+    const cancel = e.target.closest('[data-finding-cancel]');
+    if (cancel) {
+      e.preventDefault();
+      hideFindingForm(pane);
+      return;
+    }
+    const edit = e.target.closest('[data-finding-edit]');
+    if (edit) {
+      e.preventDefault();
+      findingsFetch('/api/tools/findings/' + encodeURIComponent(edit.dataset.id), 'GET').then((d) => {
+        if (!d.ok || !d.finding) {
+          alert('Could not load finding: ' + (d.error || 'unknown'));
+          return;
+        }
+        showFindingForm(pane, d.finding, { editId: edit.dataset.id });
+      });
+      return;
+    }
+    const del = e.target.closest('[data-finding-delete]');
+    if (del) {
+      e.preventDefault();
+      if (!confirm('Delete this finding? This cannot be undone.')) return;
+      findingsFetch('/api/tools/findings/' + encodeURIComponent(del.dataset.id), 'DELETE').then((d) => {
+        if (!d.ok) {
+          alert('Delete failed: ' + (d.error || 'unknown error'));
+          return;
+        }
+        rerun();
+      });
+      return;
+    }
+    const saveCve = e.target.closest('[data-finding-save]');
+    if (saveCve) {
+      e.preventDefault();
+      findingsFetch('/api/tools/findings', 'POST', {
+        title: saveCve.dataset.title || saveCve.dataset.cve || 'CVE finding',
+        cve_id: saveCve.dataset.cve || '',
+        cvss_score: Number(saveCve.dataset.cvss || 0),
+        severity: saveCve.dataset.severity || 'medium',
+        endpoint: saveCve.dataset.endpoint || '',
+        description: saveCve.dataset.description || '',
+        references: (saveCve.dataset.references || '').split('\n').filter(Boolean),
+        status: 'open',
+      }).then((d) => {
+        if (!d.ok) {
+          alert('Save failed: ' + (d.error || 'unknown error'));
+          return;
+        }
+        saveCve.textContent = 'Saved ✓';
+        saveCve.disabled = true;
+      });
+      return;
+    }
+  });
+}
+
+function toolForPane(pane) {
+  const id = pane.dataset.tool;
+  return (window.VAULT_TOOLS.getTool && window.VAULT_TOOLS.getTool(id)) || null;
+}
+
+function showFindingForm(pane, finding, opts) {
+  const wrap = pane.querySelector('[data-finding-form-wrap]');
+  if (!wrap) return;
+  const f = finding || {};
+  const set = (name, val) => {
+    const el = wrap.querySelector('[name="' + name + '"]');
+    if (el) el.value = val != null ? String(val) : '';
+  };
+  set('f_title', f.title || '');
+  set('f_target', f.target || '');
+  set('f_vuln_type', f.vuln_type || '');
+  set('f_severity', f.severity || 'medium');
+  set('f_status', f.status || 'open');
+  set('f_cve_id', f.cve_id || '');
+  set('f_cvss_score', f.cvss_score || '');
+  set('f_endpoint', f.endpoint || '');
+  set('f_description', f.description || '');
+  set('f_remediation', f.remediation || '');
+  set('f_references', (f.references || []).join('\n'));
+  set('f_tags', (f.tags || []).join(', '));
+  const saveBtn = wrap.querySelector('[data-finding-save-new]');
+  if (saveBtn) {
+    saveBtn.dataset.editId = opts && opts.editId ? opts.editId : '';
+    saveBtn.textContent = opts && opts.editId ? 'Update finding' : 'Save finding';
+  }
+  wrap.classList.remove('hidden');
+  wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function hideFindingForm(pane) {
+  const wrap = pane.querySelector('[data-finding-form-wrap]');
+  if (wrap) {
+    wrap.classList.add('hidden');
+    const saveBtn = wrap.querySelector('[data-finding-save-new]');
+    if (saveBtn) saveBtn.dataset.editId = '';
+  }
+}
+
+function readFindingForm(pane) {
+  const wrap = pane.querySelector('[data-finding-form-wrap]');
+  const val = (name) => {
+    const el = wrap.querySelector('[name="' + name + '"]');
+    return el ? el.value.trim() : '';
+  };
+  return {
+    title: val('f_title'),
+    target: val('f_target'),
+    vuln_type: val('f_vuln_type'),
+    severity: val('f_severity'),
+    status: val('f_status'),
+    cve_id: val('f_cve_id'),
+    cvss_score: Number(val('f_cvss_score') || 0),
+    endpoint: val('f_endpoint'),
+    description: val('f_description'),
+    remediation: val('f_remediation'),
+    references: val('f_references').split('\n').map((s) => s.trim()).filter(Boolean),
+    tags: val('f_tags').split(',').map((s) => s.trim()).filter(Boolean),
+  };
+}
+
+async function findingsFetch(url, method, body) {
+  try {
+    const opts = { method, headers: {} };
+    if (body !== undefined) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    const res = await fetch(url, opts);
+    let d = null;
+    try {
+      d = await res.json();
+    } catch (_) {
+      d = null;
+    }
+    if (!res.ok) {
+      return { ok: false, error: (d && d.error) || (await res.text()) || 'HTTP ' + res.status };
+    }
+    return d;
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+
 if (dom.vulnDetailBack) {
   dom.vulnDetailBack.addEventListener('click', () => closeVulnDetailToScan({ push: true }));
 }
@@ -1056,27 +1338,134 @@ async function loadToolStatus() {
 }
 
 // ─── Ask / RAG Chat ────────────────────────────────────────────────────────
+function renderModelControls(status) {
+  if (!dom.askModelStatus) return;
+  const el = dom.askModelStatus;
+  const startBtn = dom.askModelStart;
+  const stopBtn = dom.askModelStop;
+
+  if (status.starting) {
+    el.textContent = 'Model loading…';
+    el.classList.add('offline');
+    startBtn.classList.add('hidden');
+    stopBtn.classList.add('hidden');
+    startBtn.disabled = true;
+    return;
+  }
+  startBtn.disabled = false;
+
+  if (status.ready) {
+    if (status.managed) {
+      el.textContent = 'Model ready';
+      el.classList.remove('offline');
+    } else {
+      el.textContent = 'Model ready (external instance)';
+      el.classList.remove('offline');
+    }
+    startBtn.classList.add('hidden');
+    stopBtn.classList.remove('hidden');
+  } else {
+    el.textContent = 'Model offline';
+    el.classList.add('offline');
+    startBtn.classList.remove('hidden');
+    stopBtn.classList.add('hidden');
+  }
+}
+
 async function checkModelStatus() {
   if (!dom.askModelStatus) return;
+  let data = null;
   try {
     const res = await fetch('/api/chat/status');
     if (!res.ok) {
-      dom.askModelStatus.textContent = 'Model offline';
-      dom.askModelStatus.classList.add('offline');
+      renderModelControls({ ready: false, managed: false, starting: false });
       return;
     }
-    const data = await res.json();
-    if (data.ready) {
-      dom.askModelStatus.textContent = 'Model ready';
-      dom.askModelStatus.classList.remove('offline');
-    } else {
-      dom.askModelStatus.textContent = 'Model loading…';
-      dom.askModelStatus.classList.add('offline');
-    }
+    data = await res.json();
   } catch {
-    dom.askModelStatus.textContent = 'Model offline';
-    dom.askModelStatus.classList.add('offline');
+    renderModelControls({ ready: false, managed: false, starting: false });
+    return;
   }
+  renderModelControls({
+    ready: !!data.ready,
+    managed: !!data.managed,
+    starting: !!data.starting,
+  });
+}
+
+let modelPollTimer = null;
+
+function pollModelUntilReady() {
+  clearInterval(modelPollTimer);
+  let attempts = 0;
+  modelPollTimer = setInterval(async () => {
+    attempts++;
+    let ready = false;
+    let starting = true;
+    let managed = false;
+    try {
+      const res = await fetch('/api/chat/status');
+      if (res.ok) {
+        const data = await res.json();
+        ready = !!data.ready;
+        starting = !!data.starting;
+        managed = !!data.managed;
+      }
+    } catch (_) {
+      starting = false;
+    }
+    renderModelControls({ ready, managed, starting });
+    // Stop polling when ready, or after ~3 min (model load is slow on CPU).
+    if (ready || (!starting && attempts > 5) || attempts > 90) {
+      clearInterval(modelPollTimer);
+      modelPollTimer = null;
+    }
+  }, 2000);
+}
+
+// Start / Stop model buttons inside the Ask panel
+if (dom.askModelStart) {
+  dom.askModelStart.addEventListener('click', async () => {
+    dom.askModelStart.disabled = true;
+    dom.askModelStatus.textContent = 'Starting model…';
+    dom.askModelStatus.classList.add('offline');
+    try {
+      const res = await fetch('/api/chat/model/start', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        dom.askModelStatus.textContent = 'Start failed: ' + (data.error || 'HTTP ' + res.status);
+        dom.askModelStatus.classList.add('offline');
+        renderModelControls({ ready: false, managed: false, starting: false });
+        return;
+      }
+      renderModelControls({ ready: !!data.ready, managed: false, starting: true });
+      pollModelUntilReady();
+    } catch (err) {
+      dom.askModelStatus.textContent = 'Start failed: ' + err.message;
+      dom.askModelStatus.classList.add('offline');
+      renderModelControls({ ready: false, managed: false, starting: false });
+    }
+  });
+}
+
+if (dom.askModelStop) {
+  dom.askModelStop.addEventListener('click', async () => {
+    dom.askModelStop.disabled = true;
+    try {
+      const res = await fetch('/api/chat/model/stop', { method: 'POST' });
+      const data = await res.json();
+      const stopped = data.ok && data.stopped;
+      dom.askModelStatus.textContent = stopped ? 'Model stopped' : 'Stopped (external instance left running)';
+      dom.askModelStatus.classList.add('offline');
+      renderModelControls({ ready: false, managed: false, starting: false });
+    } catch (err) {
+      dom.askModelStatus.textContent = 'Stop failed: ' + err.message;
+      dom.askModelStatus.classList.add('offline');
+      renderModelControls({ ready: false, managed: false, starting: false });
+    } finally {
+      dom.askModelStop.disabled = false;
+    }
+  });
 }
 
 function addChatMessage(role, html) {
@@ -1236,6 +1625,53 @@ if (dom.askForm) {
   });
 }
 
+// ─── Job Center ────────────────────────────────────────────────────────────
+function initJobCenter() {
+  if (!dom.jobsToggle || !window.VaultJobs) return;
+
+  dom.jobsToggle.addEventListener('click', () => {
+    window.VaultJobs.JobCenter.toggle();
+  });
+  dom.jobsClose.addEventListener('click', () => {
+    window.VaultJobs.JobCenter.close();
+  });
+  dom.jobsBackdrop.addEventListener('click', () => {
+    window.VaultJobs.JobCenter.close();
+  });
+
+  // Completion notifications
+  const notify = (evt, type, title, body) =>
+    window.VaultJobs.toast(title, { type, body: body || '', timeout: 6000 });
+
+  window.VaultJobs.on('job.completed', (evt) => {
+    if (!evt.job) return;
+    notify(evt, 'ok', `${evt.job.label} finished`, evt.job.id);
+  });
+  window.VaultJobs.on('job.failed', (evt) => {
+    if (!evt.job) return;
+    notify(evt, 'err', `${evt.job.label} failed`, evt.job.error || evt.job.id);
+  });
+  window.VaultJobs.on('job.cancelled', (evt) => {
+    if (!evt.job) return;
+    notify(evt, 'warn', `${evt.job.label} cancelled`, evt.job.id);
+  });
+
+  // Running indicators on sidebar tool items
+  const updateIndicators = () => {
+    toolItems().forEach((el) => {
+      const toolId = el.dataset.tool;
+      if (!toolId) return;
+      el.classList.toggle(
+        'running',
+        window.VaultJobs.state.hasRunningTool(toolId)
+      );
+    });
+  };
+  window.VaultJobs.on('job.*', () => requestAnimationFrame(updateIndicators));
+  window.VaultJobs.on('job.list', updateIndicators);
+  window.updateToolRunningIndicators = updateIndicators;
+}
+
 // ─── Keyboard Shortcuts ────────────────────────────────────────────────────
 document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -1246,7 +1682,15 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     dom.sidebarToggle.click();
   }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'j') {
+    e.preventDefault();
+    if (window.VaultJobs) window.VaultJobs.JobCenter.toggle();
+  }
   if (e.key === 'Escape') {
+    if (window.VaultJobs && window.VaultJobs.JobCenter.opened) {
+      window.VaultJobs.JobCenter.close();
+      return;
+    }
     if (state.rawViewerOpen) dom.rawClose.click();
     closeSearch();
     dom.searchInput.blur();
@@ -1300,6 +1744,8 @@ async function init() {
   // Build tools UI from registry (works even if status API fails)
   await loadToolStatus();
   buildToolsUI();
+  initJobCenter();
+  if (window.updateToolRunningIndicators) window.updateToolRunningIndicators();
   checkModelStatus();
 
   try {

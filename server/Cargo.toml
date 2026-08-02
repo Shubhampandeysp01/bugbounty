@@ -34,7 +34,7 @@ reqwest = { version = "0.13.4", features = ["json", "stream"] }
 regex = "1"
 toml = "0.8"
 futures-util = "0.3"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # Dense embeddings for hybrid RAG retrieval
 fastembed = { version = "5.17.4", default-features = false, features = ["hf-hub-native-tls", "ort-download-binaries"] }

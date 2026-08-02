@@ -13,6 +13,23 @@ pub struct WpThemeHit {
     pub version: Option<String>,
     pub theme_name: Option<String>,
     pub evidence: String,
+    pub confidence: u8,
+    pub evidence_explainer: String,
+}
+
+/// Detection confidence (0–100) + human explainer per evidence source.
+fn confidence_for(evidence: &str) -> (u8, &'static str) {
+    match evidence {
+        "style.css" => (
+            90,
+            "Theme style.css header with a Version — strong fingerprint",
+        ),
+        "html_reference" => (
+            60,
+            "Slug referenced in page HTML — presence inferred, verify manually",
+        ),
+        _ => (50, "Indirect signal — verify manually"),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -99,12 +116,15 @@ pub async fn wordpress_themes(
                         active_guess = Some(slug.clone());
                     }
                     if !themes.iter().any(|t: &WpThemeHit| t.slug == *slug) {
+                        let (confidence, evidence_explainer) = confidence_for("html_reference");
                         themes.push(WpThemeHit {
                             slug: slug.clone(),
                             path: format!("/wp-content/themes/{slug}/"),
                             version: None,
                             theme_name: None,
                             evidence: "html_reference".into(),
+                            confidence,
+                            evidence_explainer: evidence_explainer.into(),
                         });
                     }
                 }
@@ -133,10 +153,13 @@ pub async fn wordpress_themes(
                     if body.contains("Theme Name:") || body.contains("Version:") {
                         let version = header_field(&body, "Version");
                         let theme_name = header_field(&body, "Theme Name");
+                        let (confidence, evidence_explainer) = confidence_for("style.css");
                         if let Some(existing) = themes.iter_mut().find(|t| t.slug == slug) {
                             existing.version = version;
                             existing.theme_name = theme_name;
                             existing.evidence = "style.css".into();
+                            existing.confidence = confidence;
+                            existing.evidence_explainer = evidence_explainer.into();
                         } else {
                             themes.push(WpThemeHit {
                                 slug: slug.clone(),
@@ -144,6 +167,8 @@ pub async fn wordpress_themes(
                                 version,
                                 theme_name,
                                 evidence: "style.css".into(),
+                                confidence,
+                                evidence_explainer: evidence_explainer.into(),
                             });
                         }
                     }
@@ -161,13 +186,15 @@ pub async fn wordpress_themes(
     themes.sort_by(|a, b| a.slug.cmp(&b.slug));
     notes.push("Probed style.css for known + HTML-discovered themes".to_string());
 
-    Ok(Json(WpThemesResponse {
+    let resp = WpThemesResponse {
         url: base,
         themes,
         active_guess,
         notes,
         error,
-    }))
+    };
+    super::result_cache::store("wordpress-themes", &resp.url, &resp);
+    Ok(Json(resp))
 }
 
 fn header_field(css: &str, field: &str) -> Option<String> {

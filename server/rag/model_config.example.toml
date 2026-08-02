@@ -1,5 +1,6 @@
 # ── Vault LLM model configuration ───────────────────────────────────────────
-# Edit THIS file to switch models, flags, or the serving backend.
+# Copy this file to `server/rag/model_config.toml` and edit for your machine.
+# The real `server/rag/model_config.toml` is gitignored (it holds local paths).
 # The Vault server reads it at startup; restart the server after changes.
 #
 # Rules:
@@ -13,8 +14,8 @@
 # as needed. Everything else stays the same.
 # ─────────────────────────────────────────────────────────────────────────────
 
-binary = "/Users/secop/Documents/VisualStudio/llama.cpp/build/bin/llama-server"
-model  = "/Users/secop/Documents/VisualStudio/openllm/models/Qwen/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf"
+binary = "/path/to/llama.cpp/build/bin/llama-server"
+model  = "/path/to/model.Q4_K_M.gguf"
 
 # Host/port the model server listens on (must match --host/--port in flags).
 api_base = "http://127.0.0.1:8080"

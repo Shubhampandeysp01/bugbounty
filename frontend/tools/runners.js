@@ -8,11 +8,11 @@ window.VAULT_TOOL_RUNNERS = {
     const primary = formEl.querySelector('[data-primary="1"]');
     if (primary) {
       const v = primary.value.trim();
-      if (!v) {
+      if (!v && !tool.allowEmptyInput) {
         primary.focus();
         return;
       }
-      params.set(tool.input.name, v);
+      if (v) params.set(tool.input.name, v);
     }
     formEl.querySelectorAll('[data-extra]').forEach((el) => {
       const v = el.value.trim();
@@ -22,6 +22,23 @@ window.VAULT_TOOL_RUNNERS = {
     resultsEl.classList.add('hidden');
     resultsEl.innerHTML = '';
     spinnerEl.classList.remove('hidden');
+
+    if (tool.async) {
+      try {
+        const job = await window.VaultJobs.submit(
+          tool.id,
+          Object.fromEntries(params)
+        );
+        spinnerEl.classList.add('hidden');
+        resultsEl.classList.remove('hidden');
+        this.renderJobRun(tool, resultsEl, job);
+      } catch (err) {
+        spinnerEl.classList.add('hidden');
+        resultsEl.classList.remove('hidden');
+        resultsEl.innerHTML = `<div class="tool-error">Failed to start job: ${escapeHtml(err.message)}</div>`;
+      }
+      return;
+    }
 
     try {
       const res = await fetch(`${tool.endpoint}?${params.toString()}`);
@@ -35,6 +52,108 @@ window.VAULT_TOOL_RUNNERS = {
       spinnerEl.classList.add('hidden');
       resultsEl.classList.remove('hidden');
       resultsEl.innerHTML = `<div class="tool-error">Failed: ${escapeHtml(err.message)}</div>`;
+    }
+  },
+
+  // Render the live running view for an async (job-managed) tool run, then
+  // swap in the normal renderer once the job reaches a terminal state.
+  async renderJobRun(tool, resultsEl, job) {
+    const wrap = document.createElement('div');
+    wrap.className = 'job-run';
+    wrap.innerHTML = `
+      <div class="job-run-head">
+        <span class="job-run-spinner"></span>
+        <span class="job-run-label">${escapeHtml(tool.title)}</span>
+        <span class="job-run-id mono">${escapeHtml(job.id)}</span>
+      </div>
+      <pre class="job-run-log" data-job-run-log></pre>
+      <div class="job-run-actions">
+        <button type="button" class="btn-ghost btn-xs" data-job-run-cancel>Cancel</button>
+        <span class="job-run-note">Running in background — open the Job Center to watch all runs.</span>
+      </div>`;
+    resultsEl.appendChild(wrap);
+
+    const logEl = wrap.querySelector('[data-job-run-log]');
+    const cancelBtn = wrap.querySelector('[data-job-run-cancel]');
+
+    window.VaultJobs.api
+      .logs(job.id)
+      .then((lines) => {
+        if (document.body.contains(logEl) && lines.length) {
+          logEl.textContent = lines.join('\n');
+          logEl.scrollTop = logEl.scrollHeight;
+        }
+      })
+      .catch(() => {});
+
+    const subs = [
+      window.VaultJobs.on('job.log', (evt) => {
+        if (evt.job_id !== job.id || !document.body.contains(logEl)) return;
+        logEl.textContent += evt.line + '\n';
+        logEl.scrollTop = logEl.scrollHeight;
+      }),
+      window.VaultJobs.on('job.completed', (evt) => {
+        if (evt.job && evt.job.id === job.id) {
+          subs.forEach((u) => u());
+          this.finishJob(tool, resultsEl, job.id);
+        }
+      }),
+      window.VaultJobs.on('job.failed', (evt) => {
+        if (evt.job && evt.job.id === job.id) {
+          subs.forEach((u) => u());
+          resultsEl.innerHTML = `<div class="tool-error">${escapeHtml(
+            evt.job.error || 'Job failed'
+          )}</div>`;
+        }
+      }),
+      window.VaultJobs.on('job.cancelled', (evt) => {
+        if (evt.job && evt.job.id === job.id) {
+          subs.forEach((u) => u());
+          resultsEl.innerHTML = `<div class="tool-empty">Job cancelled.</div>`;
+        }
+      }),
+    ];
+
+    cancelBtn.addEventListener('click', async () => {
+      cancelBtn.disabled = true;
+      cancelBtn.textContent = 'Cancelling…';
+      try {
+        await window.VaultJobs.api.cancel(job.id);
+      } catch {
+        cancelBtn.disabled = false;
+        cancelBtn.textContent = 'Cancel';
+      }
+    });
+
+    // Race guard: a very fast job can finish before we subscribed to the bus.
+    let view;
+    try {
+      view = await window.VaultJobs.api.get(job.id);
+    } catch {
+      return;
+    }
+    if (!document.body.contains(wrap)) return;
+    if (window.VaultJobs.isTerminal(view.status)) {
+      subs.forEach((u) => u());
+      if (view.status === 'succeeded') {
+        this.finishJob(tool, resultsEl, job.id);
+      } else if (view.status === 'failed') {
+        resultsEl.innerHTML = `<div class="tool-error">${escapeHtml(
+          view.error || 'Job failed'
+        )}</div>`;
+      } else {
+        resultsEl.innerHTML = `<div class="tool-empty">Job cancelled.</div>`;
+      }
+    }
+  },
+
+  async finishJob(tool, resultsEl, jobId) {
+    try {
+      const data = await window.VaultJobs.api.result(jobId);
+      const renderer = this.renderers[tool.render] || this.renderers.generic;
+      resultsEl.innerHTML = renderer(data, tool);
+    } catch (err) {
+      resultsEl.innerHTML = `<div class="tool-error">Failed to load result: ${escapeHtml(err.message)}</div>`;
     }
   },
 
@@ -114,17 +233,18 @@ window.VAULT_TOOL_RUNNERS = {
       if (!items.length) {
         list = emptyMsg('No plugins detected from probe list / HTML.');
       } else {
-        list = `<div class="findings-list">${items
-          .map((p) => {
-            const ver = p.version ? ` v${p.version}` : '';
-            return `<div class="finding-row sev-info">
-              <span class="finding-sev">${escapeHtml(p.evidence || 'plugin')}</span>
-              <div class="finding-body">
-                <div class="finding-name mono">${escapeHtml(p.slug)}${escapeHtml(ver)}</div>
-                <div class="finding-meta">${escapeHtml(p.path || '')} · HTTP ${escapeHtml(String(p.status || ''))}</div>
-              </div>
-            </div>`;
-          })
+        list = `<div class="comp-list">${items
+          .map((p) =>
+            compCard({
+              type: 'plugin',
+              slug: p.slug,
+              name: p.slug,
+              version: p.version,
+              evidence: p.evidence,
+              confidence: p.confidence,
+              meta: `${p.path || ''} · HTTP ${String(p.status || '')}`,
+            })
+          )
           .join('')}</div>`;
       }
       return (
@@ -144,20 +264,18 @@ window.VAULT_TOOL_RUNNERS = {
       if (!items.length) {
         list = emptyMsg('No themes detected.');
       } else {
-        list = `<div class="findings-list">${items
-          .map((t) => {
-            const label = t.theme_name
-              ? `${t.theme_name} (${t.slug})`
-              : t.slug;
-            const ver = t.version ? ` v${t.version}` : '';
-            return `<div class="finding-row sev-info">
-              <span class="finding-sev">${escapeHtml(t.evidence || 'theme')}</span>
-              <div class="finding-body">
-                <div class="finding-name">${escapeHtml(label)}${escapeHtml(ver)}</div>
-                <div class="finding-meta mono">${escapeHtml(t.path || '')}</div>
-              </div>
-            </div>`;
-          })
+        list = `<div class="comp-list">${items
+          .map((t) =>
+            compCard({
+              type: 'theme',
+              slug: t.slug,
+              name: t.theme_name ? `${t.theme_name} (${t.slug})` : t.slug,
+              version: t.version,
+              evidence: t.evidence,
+              confidence: t.confidence,
+              meta: t.path || '',
+            })
+          )
           .join('')}</div>`;
       }
       return (
@@ -288,54 +406,8 @@ window.VAULT_TOOL_RUNNERS = {
           'No matching vulnerabilities for detected versioned components (or versions unknown).'
         );
       } else {
-        vulnList = `<p class="tool-note">Vulnerabilities — click a row for full details</p>
-          <div class="findings-list vuln-short-list">${findings
-            .map((f, i) => {
-              const rating = (f.cvss_rating || 'none').toLowerCase();
-              const sevClass =
-                rating.includes('critical')
-                  ? 'critical'
-                  : rating.includes('high')
-                    ? 'high'
-                    : rating.includes('medium')
-                      ? 'medium'
-                      : rating.includes('low')
-                        ? 'low'
-                        : 'info';
-              const score =
-                f.cvss_score != null ? Number(f.cvss_score).toFixed(1) : '—';
-              const cve = f.cve || 'No CVE ID';
-              const patch = f.patched
-                ? `Patched${(f.patched_versions || []).length ? ' → ' + f.patched_versions.join(', ') : ''}`
-                : 'Unpatched';
-              const affected = (f.affected_versions || []).join(', ') || '—';
-              const remShort = (f.remediation || '').slice(0, 90);
-              return `<button type="button" class="finding-row sev-${sevClass} vuln-short-card"
-                  data-vuln-open
-                  data-vuln-id="${escapeHtml(f.id)}"
-                  data-software-type="${escapeHtml(f.software_type || '')}"
-                  data-slug="${escapeHtml(f.slug || '')}"
-                  data-detected-version="${escapeHtml(f.detected_version || '')}"
-                  data-idx="${i}">
-                <span class="finding-sev">${escapeHtml(f.cvss_rating || 'n/a')} ${escapeHtml(score)}</span>
-                <div class="finding-body">
-                  <div class="finding-name">
-                    <span class="vuln-cve-tag mono">${escapeHtml(cve)}</span>
-                    ${escapeHtml(f.title || '')}
-                  </div>
-                  <div class="finding-meta vuln-short-meta">
-                    <span><strong>${escapeHtml(f.software_type)}</strong> ${escapeHtml(f.slug)} <code>v${escapeHtml(f.detected_version || '?')}</code></span>
-                    <span class="pill ${f.patched ? 'pill-ok' : 'pill-bad'}">${escapeHtml(patch)}</span>
-                    <span>Affected: <code>${escapeHtml(affected)}</code></span>
-                    ${f.cwe_id != null || f.cwe ? `<span>CWE-${escapeHtml(String(f.cwe_id ?? ''))}${f.cwe ? ' ' + escapeHtml(f.cwe) : ''}</span>` : ''}
-                    ${f.published ? `<span>${escapeHtml(String(f.published).slice(0, 10))}</span>` : ''}
-                  </div>
-                  ${remShort ? `<div class="vuln-short-rem">${escapeHtml(remShort)}${(f.remediation || '').length > 90 ? '…' : ''}</div>` : ''}
-                  <div class="vuln-short-cta">View full details →</div>
-                </div>
-              </button>`;
-            })
-            .join('')}</div>`;
+        vulnList = `<p class="tool-note">Vulnerabilities — click a row for full details</p>` +
+          vulnShortCards(findings);
       }
 
       const dbLine = data.db
@@ -731,8 +803,7 @@ window.VAULT_TOOL_RUNNERS = {
       );
     },
 
-    trivy(data) {
-      if (!data.installed) {
+    trivy(data) {      if (!data.installed) {
         return missing(data, 'trivy');
       }
       const report = data.report;
@@ -793,6 +864,165 @@ window.VAULT_TOOL_RUNNERS = {
       );
     },
 
+    'cve-lookup'(data) {
+      if (data.error && !(data.records && data.records.length)) {
+        return (
+          metaBar(data) +
+          `<div class="tool-error">${escapeHtml(data.error)}</div>` +
+          notesList(data.notes)
+        );
+      }
+      const records = data.records || [];
+      if (!records.length) {
+        return emptyMsg('No CVEs found. Try a CVE ID like CVE-2024-1234 or a keyword.');
+      }
+      return (
+        metaBar(data) +
+        `<p class="tool-note">${records.length} record(s)${data.cached ? ' · served from on-disk cache' : ' · live NVD'}</p>` +
+        `<div class="findings-list">${records
+          .map((r) => {
+            const sev = severityClass(r);
+            const score = pickScore(r);
+            const scoreBadge = score
+              ? `<span class="finding-sev sev-${sev}">CVSS ${escapeHtml(score.base_score.toFixed(1))} ${escapeHtml(score.severity)}</span>`
+              : `<span class="finding-sev sev-info">n/a</span>`;
+            const cwes = (r.cwes || []).map((c) => escapeHtml(c)).join(', ');
+            const refs = (r.references || [])
+              .slice(0, 5)
+              .map((x) => `<a href="${escapeHtml(x.url)}" target="_blank" rel="noopener">${escapeHtml(x.source || x.url)}</a>`)
+              .join(' · ');
+            const published = r.published ? `<span>${escapeHtml(r.published.slice(0, 10))}</span>` : '';
+            return `<div class="finding-row sev-${sev}">
+              ${scoreBadge}
+              <div class="finding-body">
+                <div class="finding-name mono">${escapeHtml(r.cve_id)}</div>
+                <div class="finding-meta">${escapeHtml(r.description || '')}</div>
+                ${cwes ? `<div class="finding-meta">CWE: ${cwes}</div>` : ''}
+                ${published ? `<div class="finding-meta">Published: ${published}</div>` : ''}
+                ${refs ? `<div class="finding-meta">${refs}</div>` : ''}
+                <div class="finding-actions">
+                  <button type="button" class="btn-ghost btn-xs" data-finding-save
+                    data-title="${escapeHtml(r.cve_id + ': ' + truncate(r.description, 140))}"
+                    data-cve="${escapeHtml(r.cve_id)}"
+                    data-cvss="${score ? score.base_score : ''}"
+                    data-severity="${score ? score.severity.toLowerCase() : ''}"
+                    data-description="${escapeHtml(r.description || '')}"
+                    data-references="${escapeHtml((r.references || []).map((x) => x.url).join('\n'))}"
+                    data-endpoint="${escapeHtml(r.description.match(/in ([^\s.]+)/)?.[1] || '')}">
+                    Save to findings
+                  </button>
+                </div>
+              </div>
+            </div>`;
+          })
+          .join('')}</div>` +
+        (data.error ? `<div class="tool-error">${escapeHtml(data.error)}</div>` : '')
+      );
+    },
+
+    'findings-db'(data) {
+      if (data.error) {
+        return `<div class="tool-error">${escapeHtml(data.error)}</div>`;
+      }
+      const findings = data.findings || [];
+      const sevCounts = {};
+      const statusCounts = {};
+      for (const f of findings) {
+        sevCounts[f.severity || 'medium'] = (sevCounts[f.severity || 'medium'] || 0) + 1;
+        statusCounts[f.status || 'open'] = (statusCounts[f.status || 'open'] || 0) + 1;
+      }
+      const sevCards = ['critical', 'high', 'medium', 'low', 'info']
+        .filter((s) => sevCounts[s])
+        .map((s) => card(s, String(sevCounts[s])))
+        .join('');
+      const statusLine = Object.keys(statusCounts)
+        .map((s) => `${escapeHtml(s)}: ${statusCounts[s]}`)
+        .join(' · ');
+
+      const form = `
+        <div class="finding-form hidden" data-finding-form-wrap>
+          <div class="tool-results-grid">
+            ${input('title', 'Title *', 'f_title', 'Title of the finding', true)}
+            ${input('target', 'Target / host', 'f_target', 'example.com')}
+          </div>
+          <div class="tool-results-grid">
+            ${input('vuln_type', 'Vuln type', 'f_vuln_type', 'XSS, SQLi, IDOR…')}
+            ${select('Severity', 'f_severity', ['info', 'low', 'medium', 'high', 'critical'])}
+            ${select('Status', 'f_status', ['open', 'confirmed', 'fixed', 'accepted', 'info'])}
+          </div>
+          <div class="tool-results-grid">
+            ${input('cve_id', 'CVE ID', 'f_cve_id', 'CVE-2024-1234 (optional)')}
+            ${input('cvss_score', 'CVSS score', 'f_cvss_score', '9.8 (optional)')}
+            ${input('endpoint', 'Affected endpoint', 'f_endpoint', '/api/v1/users (optional)')}
+          </div>
+          ${textarea('description', 'Description', 'f_description', 'What, where, impact…')}
+          ${textarea('remediation', 'Remediation', 'f_remediation', 'How to fix…')}
+          ${input('text', 'References (one per line)', 'f_references', 'https://…')}
+          ${input('text', 'Tags (comma separated)', 'f_tags', 'wordpress, authenticated')}
+          <div class="tool-results-grid form-actions">
+            <button type="button" class="btn-primary" data-finding-save-new>Save finding</button>
+            <button type="button" class="btn-ghost" data-finding-cancel>Cancel</button>
+          </div>
+        </div>`;
+
+      let list = '';
+      if (!findings.length) {
+        list = emptyMsg('No findings yet. Run a lookup, then Save to findings — or add one manually.');
+      } else {
+        list = `<div class="findings-list">${findings
+          .map((f) => {
+            const sev = severityFrom(f.severity);
+            return `<div class="finding-row sev-${sev}">
+              <span class="finding-sev">${escapeHtml(f.severity)} ${f.cvss_score ? escapeHtml(Number(f.cvss_score).toFixed(1)) : ''}</span>
+              <div class="finding-body">
+                <div class="finding-name">${escapeHtml(f.title)}</div>
+                <div class="finding-meta">
+                  ${f.cve_id ? `<span class="vuln-cve-tag mono">${escapeHtml(f.cve_id)}</span>` : ''}
+                  <span>${escapeHtml(f.target || '')}</span>
+                  <span>${escapeHtml(f.vuln_type || '')}</span>
+                  ${f.endpoint ? `<code>${escapeHtml(f.endpoint)}</code>` : ''}
+                  <span class="pill ${f.status === 'fixed' ? 'pill-ok' : 'pill-bad'}">${escapeHtml(f.status)}</span>
+                </div>
+                ${f.description ? `<div class="finding-meta">${escapeHtml(truncate(f.description, 160))}</div>` : ''}
+                <div class="finding-meta mono">updated ${escapeHtml((f.updated_at || '').slice(0, 10))}</div>
+                <div class="finding-actions">
+                  <button type="button" class="btn-ghost btn-xs" data-finding-edit data-id="${escapeHtml(f.id)}">Edit</button>
+                  <button type="button" class="btn-ghost btn-xs" data-finding-delete data-id="${escapeHtml(f.id)}">Delete</button>
+                </div>
+              </div>
+            </div>`;
+          })
+          .join('')}</div>`;
+      }
+
+      return (
+        metaBar(data) +
+        `<div class="tool-results-grid">
+          ${card('Findings', String(findings.length))}
+          ${sevCards || card('Severity', '—')}
+        </div>` +
+        (statusLine ? `<p class="tool-note">${statusLine}</p>` : '') +
+        `<div class="tool-results-grid form-actions">
+          <button type="button" class="btn-primary" data-finding-new>New finding</button>
+        </div>` +
+        form +
+        list +
+        (data.error ? `<div class="tool-error">${escapeHtml(data.error)}</div>` : '')
+      );
+    },
+
+    'attack-surface'(data) {
+      const html = buildAttackSurfaceHtml(data);
+      queueMicrotask(() => {
+        const pane = [...document.querySelectorAll('.tool-pane')].find(
+          (p) => !p.classList.contains('hidden')
+        );
+        const root = pane && pane.querySelector('[data-ase-root]');
+        if (root) window.AttackSurfaceExplorer.bind(root, data);
+      });
+      return html;
+    },
+
     generic(data) {
       return (
         metaBar(data) +
@@ -801,9 +1031,7 @@ window.VAULT_TOOL_RUNNERS = {
       );
     },
   },
-};
-
-function escapeHtml(s) {
+};function escapeHtml(s) {
   return String(s ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -859,4 +1087,597 @@ function notesList(notes) {
   return `<ul class="tool-notes-list">${notes
     .map((n) => `<li>${escapeHtml(n)}</li>`)
     .join('')}</ul>`;
+}
+
+// Expandable component card (Plugin Enum / Theme Enum). Enrichment body is
+// lazily filled by the delegated handler in app.js via /api/tools/component-intel.
+function compCard(o) {
+  const ver = o.version
+    ? `<span class="comp-version">v${escapeHtml(o.version)}</span>`
+    : `<span class="comp-version comp-version-unknown">version unknown</span>`;
+  const conf =
+    o.confidence != null
+      ? `<span class="comp-conf" title="Detection confidence">${escapeHtml(String(o.confidence))}%</span>`
+      : '';
+  return `<div class="comp-card" data-comp-card
+      data-comp-type="${escapeHtml(o.type)}"
+      data-comp-slug="${escapeHtml(o.slug)}"
+      ${o.version ? `data-comp-version="${escapeHtml(o.version)}"` : ''}>
+    <button type="button" class="comp-head" data-comp-toggle>
+      <span class="comp-sev">${escapeHtml(o.evidence || o.type)}</span>
+      <span class="comp-main">
+        <span class="comp-name">${escapeHtml(o.name)}${ver}</span>
+        <span class="comp-meta mono">${escapeHtml(o.meta || '')}</span>
+      </span>
+      ${conf}
+      <span class="comp-chev">▸</span>
+    </button>
+    <div class="comp-body" data-comp-body hidden></div>
+  </div>`;
+}
+
+function metaCell(label, html) {
+  return `<div class="result-card comp-cell">
+    <div class="result-label">${escapeHtml(label)}</div>
+    <div class="result-value">${html || '—'}</div>
+  </div>`;
+}
+
+// Renders the lazy-loaded /api/tools/component-intel payload inside a card body.
+function renderComponentIntel(d) {
+  if (d.error && !d.name) {
+    return `<div class="comp-error">${escapeHtml(d.error)}</div>` +
+      notesList(d.notes);
+  }
+  const inst = d.detected_version
+    ? `v${escapeHtml(d.detected_version)}`
+    : 'unknown';
+  const latest = d.latest_version
+    ? `<code>${escapeHtml(d.latest_version)}</code>`
+    : '—';
+  let pill = '<span class="pill">—</span>';
+  if (d.outdated === true) pill = '<span class="pill pill-bad">⚠️ Outdated</span>';
+  else if (d.outdated === false) pill = '<span class="pill pill-ok">Up to date</span>';
+
+  const links = [
+    d.repo_url
+      ? `<a href="${escapeHtml(d.repo_url)}" target="_blank" rel="noopener">${escapeHtml(d.on_repo ? 'WP.org' : 'repo')} →</a>`
+      : '',
+    d.homepage
+      ? `<a href="${escapeHtml(d.homepage)}" target="_blank" rel="noopener">homepage →</a>`
+      : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  const grid = `<div class="tool-results-grid comp-meta-grid">
+    ${metaCell('Installed', inst)}
+    ${metaCell('Latest', latest)}
+    ${metaCell('Status', pill)}
+    ${metaCell('Maintainer', escapeHtml(d.author || '—'))}
+    ${metaCell('Downloads', d.downloads != null ? Number(d.downloads).toLocaleString() : '—')}
+    ${metaCell('Active installs', d.active_installs != null ? Number(d.active_installs).toLocaleString() : '—')}
+    ${metaCell('Last updated', escapeHtml((d.last_updated || '').slice(0, 10) || '—'))}
+    ${metaCell('Requires / Tested', escapeHtml([d.requires, d.tested].filter(Boolean).join(' / ') || '—'))}
+    ${metaCell('Links', links)}
+  </div>`;
+
+  const tags = (d.tags || []).length
+    ? `<p class="tool-note">Tags</p><div class="tag-cloud">${d.tags
+        .slice(0, 12)
+        .map((t) => `<span class="tag-chip">${escapeHtml(t)}</span>`)
+        .join('')}</div>`
+    : '';
+
+  let vulnBlock = '';
+  if (d.db_note) {
+    vulnBlock = `<p class="tool-note">⚠️ ${escapeHtml(d.db_note)}</p>`;
+  } else if (d.detected_version == null) {
+    vulnBlock = `<p class="tool-note">Installed version unknown — vulnerability matching skipped. Version detection is strongest via readme.txt / style.css.</p>`;
+  } else if (!(d.vulnerabilities || []).length) {
+    vulnBlock = `<p class="tool-note">No matching vulnerabilities in the Wordfence DB for <code>v${escapeHtml(d.detected_version)}</code>.</p>`;
+  } else {
+    vulnBlock = `<p class="tool-note">Vulnerabilities (${d.vulnerabilities.length}) — click a row for full details</p>` +
+      vulnShortCards(d.vulnerabilities);
+  }
+
+  return grid + tags + vulnBlock + (d.notes && d.notes.length ? notesList(d.notes) : '');
+}
+
+// Shared short vulnerability cards — used by the WF scan renderer and the
+// lazily-enriched component cards (both rely on app.js [data-vuln-open]).
+function vulnShortCards(findings) {
+  return `<div class="findings-list vuln-short-list">${findings
+    .map((f, i) => {
+      const rating = (f.cvss_rating || 'none').toLowerCase();
+      const sevClass =
+        rating.includes('critical')
+          ? 'critical'
+          : rating.includes('high')
+            ? 'high'
+            : rating.includes('medium')
+              ? 'medium'
+              : rating.includes('low')
+                ? 'low'
+                : 'info';
+      const score = f.cvss_score != null ? Number(f.cvss_score).toFixed(1) : '—';
+      const cve = f.cve || 'No CVE ID';
+      const patch = f.patched
+        ? `Patched${(f.patched_versions || []).length ? ' → ' + f.patched_versions.join(', ') : ''}`
+        : 'Unpatched';
+      const affected = (f.affected_versions || []).join(', ') || '—';
+      const remShort = (f.remediation || '').slice(0, 90);
+      return `<button type="button" class="finding-row sev-${sevClass} vuln-short-card"
+          data-vuln-open
+          data-vuln-id="${escapeHtml(f.id)}"
+          data-software-type="${escapeHtml(f.software_type || '')}"
+          data-slug="${escapeHtml(f.slug || '')}"
+          data-detected-version="${escapeHtml(f.detected_version || '')}"
+          data-idx="${i}">
+        <span class="finding-sev">${escapeHtml(f.cvss_rating || 'n/a')} ${escapeHtml(score)}</span>
+        <div class="finding-body">
+          <div class="finding-name">
+            <span class="vuln-cve-tag mono">${escapeHtml(cve)}</span>
+            ${escapeHtml(f.title || '')}
+          </div>
+          <div class="finding-meta vuln-short-meta">
+            <span><strong>${escapeHtml(f.software_type)}</strong> ${escapeHtml(f.slug)} <code>v${escapeHtml(f.detected_version || '?')}</code></span>
+            <span class="pill ${f.patched ? 'pill-ok' : 'pill-bad'}">${escapeHtml(patch)}</span>
+            <span>Affected: <code>${escapeHtml(affected)}</code></span>
+            ${f.cwe_id != null || f.cwe ? `<span>CWE-${escapeHtml(String(f.cwe_id ?? ''))}${f.cwe ? ' ' + escapeHtml(f.cwe) : ''}</span>` : ''}
+            ${f.published ? `<span>${escapeHtml(String(f.published).slice(0, 10))}</span>` : ''}
+          </div>
+          ${remShort ? `<div class="vuln-short-rem">${escapeHtml(remShort)}${(f.remediation || '').length > 90 ? '…' : ''}</div>` : ''}
+          <div class="vuln-short-cta">View full details →</div>
+        </div>
+      </button>`;
+    })
+    .join('')}</div>`;
+}
+
+function truncate(s, n) {
+  if (!s) return '';
+  const t = String(s);
+  return t.length > n ? t.slice(0, n) + '…' : t;
+}
+
+function pickScore(r) {
+  return r.cvss_v3 || r.cvss_v2 || null;
+}
+
+function severityClass(r) {
+  const s = pickScore(r);
+  if (!s) return 'info';
+  return severityFrom(s.severity);
+}
+
+function severityFrom(s) {
+  const t = String(s || '').toLowerCase();
+  if (t.includes('critical')) return 'critical';
+  if (t.includes('high')) return 'high';
+  if (t.includes('medium')) return 'medium';
+  if (t.includes('low')) return 'low';
+  return 'info';
+}
+
+function input(type, label, name, placeholder, required) {
+  return `<div class="result-card form-field">
+    <label class="result-label" for="${name}">${escapeHtml(label)}</label>
+    <input type="${escapeHtml(type || 'text')}" id="${name}" name="${name}" placeholder="${escapeHtml(placeholder || '')}" ${required ? 'required' : ''} data-findings-input>
+  </div>`;
+}
+
+function select(label, name, options) {
+  const opts = (options || [])
+    .map((o) => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`)
+    .join('');
+  return `<div class="result-card form-field">
+    <label class="result-label" for="${name}">${escapeHtml(label)}</label>
+    <select id="${name}" name="${name}" data-findings-input>${opts}</select>
+  </div>`;
+}
+
+function textarea(label, name, placeholder) {
+  return `<div class="result-card form-field form-field-wide">
+    <label class="result-label" for="${name}">${escapeHtml(label)}</label>
+    <textarea id="${name}" name="${name}" rows="2" placeholder="${escapeHtml(placeholder || '')}" data-findings-input></textarea>
+  </div>`;
+}
+
+// ─── Attack Surface Explorer ────────────────────────────────────────────────
+// Aggregation view over all WordPress tool results (see /api/tools/attack-surface).
+// Filter/search/tree state lives here so SSE-driven refreshes preserve it.
+
+const ASE_TRACKED_TOOLS = [
+  'wordpress-check',
+  'wordpress-plugins',
+  'wordpress-themes',
+  'wordpress-rest',
+  'wordpress-xmlrpc',
+  'wordpress-users',
+  'wordpress-paths',
+  'wordpress-vuln-scan',
+  'wordpress-nuclei',
+];
+
+const ASE_SEVERITIES = [
+  ['all', 'All'],
+  ['critical', 'Critical'],
+  ['high', 'High'],
+  ['medium', 'Medium'],
+  ['low', 'Low'],
+  ['informational', 'Info'],
+];
+
+const ASE_CATEGORIES = [
+  ['all', 'All'],
+  ['authentication', 'Authentication'],
+  ['plugins', 'Plugins'],
+  ['themes', 'Themes'],
+  ['rest', 'REST'],
+  ['files', 'Files'],
+  ['infrastructure', 'Infrastructure'],
+  ['vulnerabilities', 'Vulnerabilities'],
+];
+
+const ASE_ICONS = {
+  core: '◉',
+  authentication: '🔑',
+  rest: '↔',
+  plugins: '🧩',
+  themes: '🎨',
+  files: '📄',
+  headers: '🛡',
+  vulnerabilities: '⚠️',
+  infrastructure: '🖥',
+};
+
+function aseNormUrl(s) {
+  return String(s || '').trim().replace(/\/+$/, '').toLowerCase();
+}
+
+window.AttackSurfaceExplorer = (() => {
+  const state = {
+    url: '',
+    data: null,
+    el: null,
+    severity: 'all',
+    category: 'all',
+    query: '',
+    expanded: new Set(),
+    pending: new Set(), // toolIds being run via the missing-source Run buttons
+    timer: null,
+    running: false,
+    dirty: false,
+    bound: false,
+  };
+
+  function sameUrl(a, b) {
+    return aseNormUrl(a) === aseNormUrl(b);
+  }
+
+  function debounceRefetch() {
+    clearTimeout(state.timer);
+    state.timer = setTimeout(refetch, 400);
+  }
+
+  async function refetch() {
+    if (!state.url || !state.el || !document.contains(state.el)) return;
+    if (state.running) {
+      state.dirty = true; // coalesce: run again right after the in-flight one
+      return;
+    }
+    state.running = true;
+    state.dirty = false;
+    try {
+      const res = await fetch(
+        `/api/tools/attack-surface?url=${encodeURIComponent(state.url)}`
+      );
+      const data = await res.json();
+      state.data = data;
+      if (document.contains(state.el)) {
+        state.el.innerHTML = buildAttackSurfaceHtml(data);
+      }
+    } catch {
+      /* keep current view on transient errors */
+    } finally {
+      state.running = false;
+      if (state.dirty) debounceRefetch();
+    }
+  }
+
+  // One shared SSE subscription; guards against stale/detached panes.
+  function bind(root, data) {
+    state.url = data.url || '';
+    state.data = data;
+    state.el = root;
+    if (state.bound) return;
+    state.bound = true;
+
+    const tracked = (evt) => {
+      const tool = evt.job && evt.job.tool;
+      if (!ASE_TRACKED_TOOLS.includes(tool)) return false;
+      const jurl = (evt.job.params && evt.job.params.url) || '';
+      return sameUrl(jurl, state.url);
+    };
+
+    ['job.completed', 'job.failed', 'job.cancelled'].forEach((type) => {
+      window.VaultJobs.on(type, (evt) => {
+        if (!tracked(evt)) return;
+        state.pending.delete(evt.job.tool);
+        debounceRefetch();
+      });
+    });
+  }
+
+  function toggleNode(id) {
+    if (state.expanded.has(id)) state.expanded.delete(id);
+    else state.expanded.add(id);
+    render();
+  }
+
+  function setSeverity(v) {
+    state.severity = v;
+    render();
+  }
+  function setCategory(v) {
+    state.category = v;
+    render();
+  }
+  function setQuery(q) {
+    state.query = q || '';
+    render();
+  }
+
+  function render() {
+    if (!state.el || !document.contains(state.el) || !state.data) return;
+    if (state.data.missing) {
+      const missingIds = new Set(state.data.missing.map((m) => m.tool));
+      for (const t of [...state.pending]) {
+        if (!missingIds.has(t) && !toolRunningOn(t, state.url)) state.pending.delete(t);
+      }
+    }
+    const box = state.el.querySelector('[data-ase-search]');
+    const focused = box && document.activeElement === box;
+    const caret = focused ? box.selectionStart : 0;
+    state.el.innerHTML = buildAttackSurfaceHtml(state.data);
+    if (focused) {
+      const nb = state.el.querySelector('[data-ase-search]');
+      if (nb) {
+        nb.focus();
+        const end = Math.min(caret, nb.value.length);
+        nb.setSelectionRange(end, end);
+      }
+    }
+  }
+
+  function toolRunningOn(toolId, url) {
+    const jobs = window.VaultJobs.state.byTool(toolId);
+    return jobs.some((j) => {
+      if (window.VaultJobs.isTerminal(j.status)) return false;
+      return sameUrl((j.params && j.params.url) || '', url);
+    });
+  }
+
+  async function runMissing(toolId) {
+    const tool = window.VAULT_TOOLS.getTool(toolId);
+    if (!tool || !state.url) return;
+    if (state.pending.has(toolId)) return; // already starting
+    const url = state.url;
+    const keepPending = !!tool.async; // async stays "Running…" until terminal SSE
+
+    state.pending.add(toolId);
+    render(); // flip the row to "Running…"
+
+    try {
+      if (tool.async) {
+        if (toolRunningOn(toolId, url)) {
+          window.VaultJobs.toast(`${tool.label} is already running for this target`, {
+            type: 'warn',
+            body: 'Open the Job Center to watch live progress.',
+          });
+          return;
+        }
+        const job = await window.VaultJobs.submit(toolId, { url });
+        window.VaultJobs.toast(`Started ${tool.label}`, {
+          type: 'info',
+          body: `${job.id} · the tree refreshes when it completes.`,
+          timeout: 4500,
+        });
+      } else {
+        const res = await fetch(`${tool.endpoint}?url=${encodeURIComponent(url)}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await refetch();
+        window.VaultJobs.toast(`${tool.label} done — Attack Surface refreshed`, {
+          type: 'ok',
+          body: '',
+          timeout: 3500,
+        });
+      }
+    } catch (err) {
+      window.VaultJobs.toast(`Failed to run ${tool.label}`, {
+        type: 'err',
+        body: err.message,
+      });
+    } finally {
+      if (!keepPending) state.pending.delete(toolId);
+      render();
+    }
+  }
+
+  function expandAll() {
+    if (!state.data) return;
+    for (const n of state.data.nodes || []) state.expanded.add(n.id);
+    render();
+  }
+
+  function collapseAll() {
+    state.expanded.clear();
+    render();
+  }
+
+  return {
+    bind,
+    toggleNode,
+    setSeverity,
+    setCategory,
+    setQuery,
+    refetch,
+    runMissing,
+    expandAll,
+    collapseAll,
+    state,
+  };
+})();
+
+function aseState() {
+  return window.AttackSurfaceExplorer.state;
+}
+
+function aseToolRunning(tool, url) {
+  if (!tool || !tool.async || !window.VaultJobs) return false;
+  const jobs = window.VaultJobs.state.byTool(tool.id);
+  return jobs.some((j) => {
+    if (window.VaultJobs.isTerminal(j.status)) return false;
+    const jurl = (j.params && j.params.url) || '';
+    return aseNormUrl(jurl) === aseNormUrl(url);
+  });
+}
+
+function buildAttackSurfaceHtml(d) {
+  const s = aseState();
+  const sum = d.summary || {};
+  const overall = sum.overall || 'none';
+
+  const summaryCards = [
+    ['Core', escapeHtml(sum.core || '—')],
+    ['Plugins', String(sum.plugins ?? 0)],
+    ['Themes', String(sum.themes ?? 0)],
+    ['REST routes', String(sum.rest_routes ?? 0)],
+    ['Auth risks', String(sum.authentication ?? 0)],
+    ['Sensitive files', String(sum.sensitive_files ?? 0)],
+    ['Known vulns', String(sum.known_vulns ?? 0)],
+    ['Total findings', String(sum.total_findings ?? 0)],
+  ]
+    .map(
+      ([l, v]) =>
+        `<div class="ase-sum-card"><span>${l}</span><b>${v}</b></div>`
+    )
+    .join('');
+
+  const sevChips = ASE_SEVERITIES.map(
+    ([v, l]) =>
+      `<button type="button" class="ase-chip ${s.severity === v ? 'active' : ''}" data-ase-sev="${v}">${l}</button>`
+  ).join('');
+  const catChips = ASE_CATEGORIES.map(
+    ([v, l]) =>
+      `<button type="button" class="ase-chip ${s.category === v ? 'active' : ''}" data-ase-cat="${v}">${l}</button>`
+  ).join('');
+
+  const nodes = (d.nodes || [])
+    .map((n) => aseNodeHtml(n))
+    .filter(Boolean)
+    .join('');
+
+  const missing = (d.missing || [])
+    .map((m) => {
+      const tool = window.VAULT_TOOLS.getTool(m.tool);
+      const desc = tool ? tool.desc : '';
+      const running =
+        s.pending.has(m.tool) || (tool && tool.async && aseToolRunning(tool, d.url));
+      const btn = running
+        ? `<button type="button" class="btn-ghost btn-xs" disabled><span class="ase-run-spin"></span> Running…</button>`
+        : `<button type="button" class="btn-ghost btn-xs" data-ase-run-missing="${escapeHtml(m.tool)}">Run</button>`;
+      return `<div class="ase-missing-row ${running ? 'running' : ''}">
+        <span class="ase-missing-name">${escapeHtml(m.label || m.tool)}</span>
+        <span class="ase-missing-desc">${escapeHtml(desc)} — not run yet for this target</span>
+        ${btn}
+      </div>`;
+    })
+    .join('');
+
+  return `
+    <div class="ase" data-ase-root>
+      <div class="ase-summary">
+        <div class="ase-summary-top">
+          <span class="ase-overall sev-${escapeHtml(overall)}">Overall: ${escapeHtml(overall)}</span>
+          <span class="ase-url mono" title="${escapeHtml(d.url)}">${escapeHtml(d.url)}</span>
+          <span class="ase-meta">generated ${escapeHtml(String(d.generated_at || '').replace('T', ' ').slice(0, 19))}</span>
+          <button type="button" class="btn-ghost btn-xs" data-ase-refresh>↻ Refresh</button>
+        </div>
+        <div class="ase-summary-grid">${summaryCards}</div>
+      </div>
+      <div class="ase-controls">
+        <input class="ase-search" type="search" placeholder="Search nodes, components, CVEs…" value="${escapeHtml(s.query)}" data-ase-search>
+        <div class="ase-chip-row">${sevChips}</div>
+        <div class="ase-chip-row">${catChips}</div>
+        <div class="ase-bulk">
+          <button type="button" class="btn-ghost btn-xs" data-ase-expand-all>Expand all</button>
+          <button type="button" class="btn-ghost btn-xs" data-ase-collapse-all>Collapse all</button>
+        </div>
+      </div>
+      <div class="ase-tree">${nodes || '<div class="tool-empty">No nodes match the current filters.</div>'}</div>
+      ${missing ? `<div class="ase-missing"><div class="ase-missing-title">Sources not yet scanned for this target</div>${missing}</div>` : ''}
+    </div>`;
+}
+
+function aseNodeHtml(n) {
+  const s = aseState();
+  const sev = s.severity;
+  const cat = s.category;
+  const q = s.query.trim().toLowerCase();
+
+  if (cat !== 'all' && n.category !== cat) return '';
+
+  const items = (n.items || []).filter((i) => {
+    if (sev !== 'all' && i.severity !== sev) return false;
+    if (q) {
+      const hay =
+        `${i.label} ${i.value || ''} ${i.detail || ''} ` +
+        (i.meta || []).map(([k, v]) => `${k} ${v}`).join(' ');
+      if (!hay.toLowerCase().includes(q)) return false;
+    }
+    return true;
+  });
+  if (!items.length) return '';
+
+  const open = s.expanded.has(n.id) || s.query.trim() !== '';
+  const icon = ASE_ICONS[n.id] || '•';
+  const rows = items.map(aseItemHtml).join('');
+
+  return `
+    <div class="ase-node ${open ? 'open' : ''}" data-ase-node data-node-id="${escapeHtml(n.id)}">
+      <button type="button" class="ase-node-head" data-ase-toggle data-node="${escapeHtml(n.id)}">
+        <span class="ase-chev">▸</span>
+        <span class="ase-node-icon">${icon}</span>
+        <span class="ase-node-label">${escapeHtml(n.label)}</span>
+        <span class="ase-node-note">${escapeHtml(n.note)}</span>
+        <span class="ase-node-count">${items.length}</span>
+        <span class="ase-node-status sev-${escapeHtml(n.status)}">${escapeHtml(n.status)}</span>
+      </button>
+      <div class="ase-node-body" ${open ? '' : 'hidden'}>${rows}</div>
+    </div>`;
+}
+
+function aseItemHtml(i) {
+  const meta = (i.meta || []).length
+    ? `<details class="ase-item-meta"><summary>details</summary><div class="ase-meta-grid">${(i.meta || [])
+        .map(
+          ([k, v]) =>
+            `<div class="ase-meta-kv"><span>${escapeHtml(k)}</span><b>${escapeHtml(v)}</b></div>`
+        )
+        .join('')}</div></details>`
+    : '';
+  return `
+    <div class="ase-item sev-${escapeHtml(i.severity)}">
+      <span class="ase-item-sev">${escapeHtml(i.severity)}</span>
+      <div class="ase-item-main">
+        <div class="ase-item-label">${escapeHtml(i.label)}</div>
+        ${i.value ? `<div class="ase-item-value mono">${escapeHtml(i.value)}</div>` : ''}
+      </div>
+      <div class="ase-item-right">
+        ${i.detail ? `<div class="ase-item-detail">${escapeHtml(i.detail)}</div>` : ''}
+        ${meta}
+      </div>
+    </div>`;
 }

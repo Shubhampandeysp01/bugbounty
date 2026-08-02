@@ -795,6 +795,32 @@ fn match_component(index: &VulnIndex, comp: &DetectedComponent) -> Vec<VulnFindi
     out
 }
 
+/// Component-Intelligence contract: match a single detected component against
+/// the already-indexed Wordfence DB without re-running detection. This is a
+/// direct in-memory lookup (never a scan), so it is cheap to call per card.
+/// Returns an empty vec when the version is unknown or nothing matches; `Err`
+/// only when the Wordfence DB is unavailable on disk.
+pub fn lookup_component_vulns(
+    repo_root: &Path,
+    software_type: &str,
+    slug: &str,
+    version: &str,
+) -> Result<Vec<VulnFinding>, String> {
+    let version = version.trim();
+    if version.is_empty() || version == "*" {
+        return Ok(vec![]);
+    }
+    let index = get_or_load_index(repo_root)?;
+    let comp = DetectedComponent {
+        software_type: software_type.to_string(),
+        slug: slug.to_string(),
+        name: slug.to_string(),
+        version: Some(version.to_string()),
+        evidence: "component_intel".into(),
+    };
+    Ok(match_component(&index, &comp))
+}
+
 #[derive(Debug, Serialize)]
 pub struct VulnDetailResponse {
     pub id: String,
@@ -1102,10 +1128,13 @@ pub async fn vuln_db_refresh(
     }))
 }
 
-pub async fn wordpress_vuln_scan(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<VulnScanResponse>, (StatusCode, String)> {
+/// Job-Manager contract: the long-running scan behind `wordpress_vuln_scan`.
+/// Takes `&AppState` + params (not extractors) so the Job Manager and the
+/// legacy endpoint share one implementation.
+pub async fn wordpress_vuln_scan_core(
+    state: &AppState,
+    params: &HashMap<String, String>,
+) -> Result<VulnScanResponse, (StatusCode, String)> {
     let started = Instant::now();
     let url = params
         .get("url")
@@ -1118,7 +1147,7 @@ pub async fn wordpress_vuln_scan(
     let index = match get_or_load_index(root) {
         Ok(i) => i,
         Err(e) => {
-            return Ok(Json(VulnScanResponse {
+            return Ok(VulnScanResponse {
                 url: base,
                 components: vec![],
                 findings: vec![],
@@ -1145,7 +1174,7 @@ pub async fn wordpress_vuln_scan(
                 duration_ms: started.elapsed().as_millis() as u64,
                 notes: vec![e.clone()],
                 error: Some(e),
-            }));
+            });
         }
     };
 
@@ -1204,7 +1233,7 @@ pub async fn wordpress_vuln_scan(
         notes.push("Core version not detected — core CVEs may be incomplete.".into());
     }
 
-    Ok(Json(VulnScanResponse {
+    Ok(VulnScanResponse {
         url: base,
         components,
         findings,
@@ -1222,7 +1251,16 @@ pub async fn wordpress_vuln_scan(
         duration_ms: started.elapsed().as_millis() as u64,
         notes,
         error: None,
-    }))
+    })
+}
+
+pub async fn wordpress_vuln_scan(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    Ok(Json(
+        crate::jobs::run_sync(&state, "wordpress-vuln-scan", params).await?,
+    ))
 }
 
 // unit-ish checks without full test harness

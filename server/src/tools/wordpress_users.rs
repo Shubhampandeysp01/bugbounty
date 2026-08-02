@@ -208,14 +208,16 @@ pub async fn wordpress_users(
 
     users.sort_by_key(|a| a.id);
 
-    Ok(Json(WpUsersResponse {
+    let resp = WpUsersResponse {
         url: base,
         users,
         rest_users_enabled,
         author_enum_works,
         notes,
         error,
-    }))
+    };
+    super::result_cache::store("wordpress-users", &resp.url, &resp);
+    Ok(Json(resp))
 }
 
 fn extract_author_slug(url: &str) -> Option<String> {

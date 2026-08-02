@@ -317,8 +317,8 @@ pub async fn chat(
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             format!(
-                "Model server not reachable at {}. Ensure llama-server is running \
-                 (see server/rag/model_config.toml).",
+                "Model server is not running. Click “Start model” in the Ask panel \
+                 (or launch llama-server at {}). See server/rag/model_config.toml.",
                 state.model.config.api_base
             ),
         ));
@@ -377,14 +377,51 @@ pub async fn chat(
 }
 
 /// Reports whether the local model server is up, for the Ask panel UI.
+/// `managed` = we spawned it (so the UI can offer Stop); `starting` = a manual
+/// start is still loading.
 pub async fn model_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let ready = state.model.is_healthy().await;
     Ok(Json(json!({
         "ready": ready,
+        "starting": state.model.is_starting(),
+        "managed": state.model.is_managed(),
         "api_base": state.model.config.api_base,
         "model": state.model.config.model,
+    })))
+}
+
+/// POST /api/chat/model/start — spawns the model server (background) so RAG
+/// chat can be used. Non-blocking; poll /api/chat/status until ready.
+pub async fn start_model(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let outcome = state
+        .model
+        .start()
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({
+        "ok": true,
+        "status": outcome,
+        "ready": state.model.is_healthy().await,
+        "starting": state.model.is_starting(),
+    })))
+}
+
+/// POST /api/chat/model/stop — kills the model server we spawned (leaves
+/// externally-launched instances alone).
+pub async fn stop_model(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let stopped = state.model.stop();
+    Ok(Json(json!({
+        "ok": true,
+        "stopped": stopped,
+        "ready": false,
+        "starting": false,
+        "managed": false,
     })))
 }
 
@@ -408,8 +445,8 @@ pub async fn chat_stream(
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             format!(
-                "Model server not reachable at {}. Ensure llama-server is running \
-                 (see server/rag/model_config.toml).",
+                "Model server is not running. Click “Start model” in the Ask panel \
+                 (or launch llama-server at {}). See server/rag/model_config.toml.",
                 state.model.config.api_base
             ),
         ));

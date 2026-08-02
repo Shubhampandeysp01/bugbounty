@@ -5,8 +5,11 @@ use reqwest::Client;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
-use tokio::process::Command;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::process::{Child, Command};
 use tokio::time::{timeout, Duration};
 
 /// Shared HTTP client for builtin recon tools.
@@ -127,23 +130,44 @@ pub fn resolve_scan_path(repo_root: &Path, raw: &str) -> Result<PathBuf, String>
     Ok(canonical)
 }
 
-pub async fn run_cli(binary: &str, args: &[&str], timeout_secs: u64) -> CliResult {
+/// Result of a streamed CLI run: `result` mirrors the old `run_cli` output,
+/// `cancelled` is true when the run was aborted by the job's cancel flag
+/// rather than by timeout/natural exit.
+#[derive(Debug, Serialize)]
+pub struct StreamedCli {
+    pub result: CliResult,
+    pub cancelled: bool,
+}
+
+/// Like `run_cli`, but streams stdout lines to `on_line` as they arrive and
+/// aborts the child as soon as `cancel` flips (checked between lines). Used by
+/// the Job Manager so jobs get live logs + real cancellation.
+pub async fn run_cli_stream(
+    binary: &str,
+    args: &[&str],
+    timeout_secs: u64,
+    cancel: Arc<AtomicBool>,
+    mut on_line: impl FnMut(&str),
+) -> StreamedCli {
     let started = Instant::now();
     let cmd_display = format!("{binary} {}", args.join(" "));
 
     let Some(bin_path) = find_binary(binary) else {
-        return CliResult {
-            ok: false,
-            binary: binary.to_string(),
-            installed: false,
-            stdout: String::new(),
-            stderr: String::new(),
-            exit_code: None,
-            error: Some(format!(
-                "{binary} is not installed. Run: brew install {binary}"
-            )),
-            duration_ms: 0,
-            command: cmd_display,
+        return StreamedCli {
+            result: CliResult {
+                ok: false,
+                binary: binary.to_string(),
+                installed: false,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                error: Some(format!(
+                    "{binary} is not installed. Run: brew install {binary}"
+                )),
+                duration_ms: 0,
+                command: cmd_display,
+            },
+            cancelled: false,
         };
     };
 
@@ -153,61 +177,96 @@ pub async fn run_cli(binary: &str, args: &[&str], timeout_secs: u64) -> CliResul
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    let child = match cmd.spawn() {
+    let mut child: Child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return CliResult {
-                ok: false,
-                binary: binary.to_string(),
-                installed: true,
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: None,
-                error: Some(format!("Failed to spawn {binary}: {e}")),
-                duration_ms: started.elapsed().as_millis() as u64,
-                command: cmd_display,
+            return StreamedCli {
+                result: CliResult {
+                    ok: false,
+                    binary: binary.to_string(),
+                    installed: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: None,
+                    error: Some(format!("Failed to spawn {binary}: {e}")),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    command: cmd_display,
+                },
+                cancelled: false,
             };
         }
     };
 
-    let output = match timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
-            return CliResult {
-                ok: false,
-                binary: binary.to_string(),
-                installed: true,
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: None,
-                error: Some(format!("Process error: {e}")),
-                duration_ms: started.elapsed().as_millis() as u64,
-                command: cmd_display,
-            };
-        }
-        Err(_) => {
-            return CliResult {
-                ok: false,
-                binary: binary.to_string(),
-                installed: true,
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: None,
-                error: Some(format!("Timed out after {timeout_secs}s")),
-                duration_ms: started.elapsed().as_millis() as u64,
-                command: cmd_display,
-            };
-        }
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let mut stdout_buf = String::new();
+    let mut stderr_buf = String::new();
+    let mut cancelled = false;
+    let mut timed_out = false;
+
+    // Read stderr concurrently so a chatty child never blocks on a full pipe.
+    let stderr_task = {
+        let mut stderr = stderr;
+        tokio::spawn(async move {
+            let mut buf = String::new();
+            if let Some(s) = stderr.as_mut() {
+                let _ = s.read_to_string(&mut buf).await;
+            }
+            buf
+        })
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let code = output.status.code();
-    let ok = output.status.success();
+    if let Some(mut out) = stdout {
+        let mut reader = BufReader::new(&mut out);
+        let mut line = String::new();
+        let overall = tokio::time::sleep(Duration::from_secs(timeout_secs));
+        tokio::pin!(overall);
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                cancelled = true;
+                break;
+            }
+            // 250ms slice: re-check the cancel flag between reads so a quiet
+            // child never delays cancellation by the read timeout.
+            let read = timeout(Duration::from_millis(250), reader.read_line(&mut line));
+            tokio::select! {
+                _ = &mut overall => {
+                    // Overall timeout hit — kill like a hard failure.
+                    timed_out = true;
+                    break;
+                }
+                res = read => match res {
+                    Ok(Ok(0)) => break, // EOF
+                    Ok(Ok(_)) => {
+                        stdout_buf.push_str(&line);
+                        on_line(line.trim_end_matches(['\r', '\n']));
+                        line.clear();
+                    }
+                    Ok(Err(e)) => {
+                        stderr_buf.push_str(&format!("stdout read error: {e}\n"));
+                        break;
+                    }
+                    Err(_) => continue, // nothing new within the slice — re-check cancel
+                },
+            }
+        }
+    }
 
-    // Scanners often exit non-zero when findings exist; also ignore pure banner stderr
+    if cancelled || timed_out {
+        let _ = child.start_kill();
+    }
+    let status = child.wait().await;
+    let code: Option<i32> = status.ok().and_then(|s| s.code());
+
+    let stderr_full = stderr_task.await.unwrap_or_default();
+    stderr_buf.push_str(&stderr_full);
+
+    let stdout = stdout_buf;
+    let stderr = stderr_buf;
+
+    // Soft-ok logic mirrors `run_cli` so the parse layer behaves identically.
     let has_stdout = !stdout.trim().is_empty();
-    let soft_ok = ok || has_stdout;
+    let soft_ok = has_stdout;
 
     let error = if soft_ok {
         None
@@ -225,25 +284,35 @@ pub async fn run_cli(binary: &str, args: &[&str], timeout_secs: u64) -> CliResul
             .collect::<Vec<_>>()
             .join(" | ");
         Some(if hint.is_empty() {
-            format!(
-                "{binary} exited with code {}",
-                code.map(|c| c.to_string()).unwrap_or_else(|| "?".into())
-            )
+            if cancelled {
+                "Cancelled".to_string()
+            } else if timed_out {
+                format!("{binary} timed out after {timeout_secs}s")
+            } else {
+                format!(
+                    "{binary} exited with code {}",
+                    code.map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+                )
+            }
         } else {
             truncate_output(&hint, 400)
         })
     };
 
-    CliResult {
-        ok: soft_ok,
-        binary: binary.to_string(),
-        installed: true,
-        stdout,
-        stderr,
-        exit_code: code,
-        error,
-        duration_ms: started.elapsed().as_millis() as u64,
-        command: cmd_display,
+    let exit_code = code;
+    StreamedCli {
+        result: CliResult {
+            ok: soft_ok,
+            binary: binary.to_string(),
+            installed: true,
+            stdout,
+            stderr,
+            exit_code,
+            error,
+            duration_ms: started.elapsed().as_millis() as u64,
+            command: cmd_display,
+        },
+        cancelled,
     }
 }
 

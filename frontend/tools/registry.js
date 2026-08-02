@@ -6,6 +6,7 @@
  *   recon     → asset discovery / surface mapping
  *   web       → website probe / scan / fuzz
  *   local     → scan files on disk
+ *   intel     → vulnerability intel / tracking
  *
  * To DELETE a tool: remove its object here + server module (see tools/DELETE.md).
  */
@@ -16,6 +17,24 @@ window.VAULT_TOOLS = {
       label: 'WordPress',
       eyebrow: 'CMS',
       tools: [
+        {
+          id: 'attack-surface',
+          label: 'Attack Surface',
+          desc: 'Aggregated tree · filters · live',
+          badge: 'View',
+          title: 'Attack Surface Explorer',
+          blurb:
+            'Aggregate every WordPress tool result into one filterable, searchable tree — Core, Authentication, REST API, Plugins, Themes, Sensitive Files, Security Headers, Vulnerabilities, Infrastructure. Reuses existing tool outputs (no re-scanning) and refreshes live as jobs complete.',
+          binary: null,
+          input: {
+            type: 'url',
+            name: 'url',
+            placeholder: 'https://example.com',
+            label: 'Target URL',
+          },
+          endpoint: '/api/tools/attack-surface',
+          render: 'attack-surface',
+        },
         {
           id: 'wordpress-check',
           label: 'Version Check',
@@ -172,6 +191,7 @@ window.VAULT_TOOLS = {
             },
           ],
           endpoint: '/api/tools/wordpress-nuclei',
+          async: true,
           render: 'nuclei',
         },
         {
@@ -190,6 +210,7 @@ window.VAULT_TOOLS = {
             label: 'Target URL',
           },
           endpoint: '/api/tools/wordpress-vuln-scan',
+          async: true,
           render: 'wp-vuln-scan',
           dbRefresh: true,
         },
@@ -223,6 +244,7 @@ window.VAULT_TOOLS = {
             },
           ],
           endpoint: '/api/tools/subfinder',
+          async: true,
           render: 'subdomains',
         },
         {
@@ -240,6 +262,7 @@ window.VAULT_TOOLS = {
             label: 'Target domain',
           },
           endpoint: '/api/tools/waybackurls',
+          async: true,
           render: 'url-list',
         },
         {
@@ -265,6 +288,7 @@ window.VAULT_TOOLS = {
             },
           ],
           endpoint: '/api/tools/katana',
+          async: true,
           render: 'url-list',
         },
         {
@@ -282,6 +306,7 @@ window.VAULT_TOOLS = {
             label: 'Target URL',
           },
           endpoint: '/api/tools/js-analysis',
+          async: true,
           render: 'js-analysis',
         },
       ],
@@ -306,6 +331,7 @@ window.VAULT_TOOLS = {
             label: 'Target URL',
           },
           endpoint: '/api/tools/httpx',
+          async: true,
           render: 'httpx',
         },
         {
@@ -337,6 +363,7 @@ window.VAULT_TOOLS = {
             },
           ],
           endpoint: '/api/tools/nuclei',
+          async: true,
           render: 'nuclei',
         },
         {
@@ -354,6 +381,7 @@ window.VAULT_TOOLS = {
             label: 'Target URL',
           },
           endpoint: '/api/tools/ffuf',
+          async: true,
           render: 'ffuf',
         },
         {
@@ -372,6 +400,7 @@ window.VAULT_TOOLS = {
             label: 'Target URL',
           },
           endpoint: '/api/tools/cors-check',
+          async: true,
           render: 'cors-check',
         },
         {
@@ -415,6 +444,7 @@ window.VAULT_TOOLS = {
             defaultValue: '.',
           },
           endpoint: '/api/tools/gitleaks',
+          async: true,
           render: 'gitleaks',
         },
         {
@@ -433,7 +463,74 @@ window.VAULT_TOOLS = {
             defaultValue: '.',
           },
           endpoint: '/api/tools/trivy',
+          async: true,
           render: 'trivy',
+        },
+      ],
+    },
+    {
+      id: 'intel',
+      label: 'Intel',
+      eyebrow: 'Vulns',
+      tools: [
+        {
+          id: 'cve-lookup',
+          label: 'CVE Lookup',
+          desc: 'NVD record + CVSS + refs',
+          badge: 'Intel',
+          title: 'CVE Lookup (NVD)',
+          blurb:
+            'Look up a CVE (e.g. CVE-2024-1234) or keyword-search the NVD 2.0 API. Records are cached on disk for offline reuse and to prefill the findings DB.',
+          binary: null,
+          input: {
+            type: 'text',
+            name: 'cve',
+            placeholder: 'CVE-2024-1234',
+            label: 'CVE ID',
+          },
+          extras: [
+            {
+              type: 'text',
+              name: 'q',
+              placeholder: 'linux kernel rce (optional search)',
+              label: 'Keyword search',
+            },
+          ],
+          endpoint: '/api/tools/cve-lookup',
+          render: 'cve-lookup',
+        },
+        {
+          id: 'findings-db',
+          label: 'Findings DB',
+          desc: 'Store & track confirmed findings',
+          badge: 'Track',
+          title: 'Findings Database',
+          blurb:
+            'A persistent local store of confirmed findings — severity, status, CVE/CVSS, affected endpoint, remediation, tags. Ideal place to log what you prove.',
+          binary: null,
+          input: {
+            type: 'text',
+            name: 'q',
+            placeholder: 'search title / target / CVE / tag',
+            label: 'Search',
+          },
+          extras: [
+            {
+              type: 'text',
+              name: 'severity',
+              placeholder: 'high (optional)',
+              label: 'Severity',
+            },
+            {
+              type: 'text',
+              name: 'status',
+              placeholder: 'open (optional)',
+              label: 'Status',
+            },
+          ],
+          endpoint: '/api/tools/findings',
+          render: 'findings-db',
+          allowEmptyInput: true,
         },
       ],
     },

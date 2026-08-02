@@ -158,7 +158,7 @@ pub async fn wordpress_rest(
         notes.push("REST API root not reachable — may be disabled or blocked".into());
     }
 
-    Ok(Json(WpRestResponse {
+    let resp = WpRestResponse {
         url: base,
         available,
         name,
@@ -169,5 +169,7 @@ pub async fn wordpress_rest(
         route_count,
         notes,
         error,
-    }))
+    };
+    super::result_cache::store("wordpress-rest", &resp.url, &resp);
+    Ok(Json(resp))
 }

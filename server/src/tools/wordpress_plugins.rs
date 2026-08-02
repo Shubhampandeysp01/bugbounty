@@ -14,6 +14,31 @@ pub struct WpPluginHit {
     pub status: u16,
     pub version: Option<String>,
     pub evidence: String,
+    pub confidence: u8,
+    pub evidence_explainer: String,
+}
+
+/// Detection confidence (0–100) + human explainer per evidence source.
+fn confidence_for(evidence: &str) -> (u8, &'static str) {
+    match evidence {
+        "readme.txt" => (
+            92,
+            "Official plugin readme.txt with a Stable Tag — strong fingerprint",
+        ),
+        "directory_listing" => (
+            75,
+            "Plugin directory listing exposed — presence confirmed, version unknown",
+        ),
+        "plugin_path_200" => (
+            70,
+            "Plugin path returned HTTP 200 — presence likely, version unknown",
+        ),
+        "html_reference" => (
+            60,
+            "Slug referenced in page HTML — presence inferred, verify manually",
+        ),
+        _ => (50, "Indirect signal — verify manually"),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -141,12 +166,15 @@ pub async fn wordpress_plugins(
                             || body.contains("Contributors:")
                         {
                             let version = extract_stable_tag(&body);
+                            let (confidence, evidence_explainer) = confidence_for("readme.txt");
                             plugins.push(WpPluginHit {
                                 slug: slug.to_string(),
                                 path: format!("/wp-content/plugins/{slug}/"),
                                 status,
                                 version,
                                 evidence: "readme.txt".into(),
+                                confidence,
+                                evidence_explainer: evidence_explainer.into(),
                             });
                             continue;
                         }
@@ -179,16 +207,20 @@ pub async fn wordpress_plugins(
                                 || body.contains("Directory listing")
                                 || body.contains("<title>"))
                         {
+                            let ev = if body.contains("Index of") {
+                                "directory_listing"
+                            } else {
+                                "plugin_path_200"
+                            };
+                            let (confidence, evidence_explainer) = confidence_for(ev);
                             plugins.push(WpPluginHit {
                                 slug: slug.to_string(),
                                 path: format!("/wp-content/plugins/{slug}/"),
                                 status,
                                 version: None,
-                                evidence: if body.contains("Index of") {
-                                    "directory_listing".into()
-                                } else {
-                                    "plugin_path_200".into()
-                                },
+                                evidence: ev.into(),
+                                confidence,
+                                evidence_explainer: evidence_explainer.into(),
                             });
                         }
                     }
@@ -209,6 +241,8 @@ pub async fn wordpress_plugins(
                         status: 200,
                         version: None,
                         evidence: "html_reference".into(),
+                        confidence: 60,
+                        evidence_explainer: "Slug referenced in page HTML — presence inferred, verify manually".into(),
                     });
                 }
             }
@@ -221,13 +255,15 @@ pub async fn wordpress_plugins(
 
     plugins.sort_by(|a, b| a.slug.cmp(&b.slug));
 
-    Ok(Json(WpPluginsResponse {
+    let resp = WpPluginsResponse {
         url: base,
         plugins,
         probed: PLUGIN_SLUGS.len(),
         notes,
         error,
-    }))
+    };
+    super::result_cache::store("wordpress-plugins", &resp.url, &resp);
+    Ok(Json(resp))
 }
 
 fn extract_stable_tag(readme: &str) -> Option<String> {

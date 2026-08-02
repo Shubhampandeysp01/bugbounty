@@ -1,12 +1,19 @@
 //! WordPress → Nuclei WP templates — DELETE file + route + registry to remove.
 //! Runs nuclei with WordPress-focused tags (uses installed nuclei binary).
 
-use axum::{extract::Query, http::StatusCode, response::Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::Json,
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use super::common::{normalize_url, run_cli, truncate_output};
+use super::common::{normalize_url, truncate_output, CliResult};
+use crate::jobs::CliCtx;
+use crate::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct WpNucleiResponse {
@@ -20,13 +27,9 @@ pub struct WpNucleiResponse {
     pub note: String,
 }
 
-pub async fn wordpress_nuclei(
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<WpNucleiResponse>, (StatusCode, String)> {
-    let url = params
-        .get("url")
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing 'url' parameter".to_string()))?;
-    let target = normalize_url(url).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+/// Job-Manager contract: build the CLI argument vector from tool params.
+pub fn build_args(_ctx: &CliCtx, params: &HashMap<String, String>) -> Result<Vec<String>, String> {
+    let target = target_from_params(params)?;
 
     let severity = params
         .get("severity")
@@ -45,41 +48,56 @@ pub async fn wordpress_nuclei(
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == ',' || c == '-' || c == '_')
     {
-        return Err((StatusCode::BAD_REQUEST, "Invalid tags".into()));
+        return Err("Invalid tags".into());
     }
 
-    let args = [
-        "-u",
-        &target,
-        "-jsonl",
-        "-silent",
-        "-no-color",
-        "-severity",
-        severity,
-        "-tags",
-        &tags,
-        "-timeout",
-        "10",
-        "-retries",
-        "1",
-        "-rate-limit",
-        "40",
-        "-no-interactsh",
-    ];
+    Ok(vec![
+        "-u".into(),
+        target,
+        "-jsonl".into(),
+        "-silent".into(),
+        "-no-color".into(),
+        "-severity".into(),
+        severity.to_string(),
+        "-tags".into(),
+        tags,
+        "-timeout".into(),
+        "10".into(),
+        "-retries".into(),
+        "1".into(),
+        "-rate-limit".into(),
+        "40".into(),
+        "-no-interactsh".into(),
+    ])
+}
 
-    let result = run_cli("nuclei", &args, 150).await;
+fn target_from_params(params: &HashMap<String, String>) -> Result<String, String> {
+    let url = params
+        .get("url")
+        .ok_or_else(|| "Missing 'url' parameter".to_string())?;
+    normalize_url(url)
+}
+
+/// Job-Manager contract: turn a `CliResult` into the renderer's JSON.
+pub fn parse_output(
+    _ctx: &CliCtx,
+    params: &HashMap<String, String>,
+    result: &CliResult,
+) -> Result<serde_json::Value, String> {
+    let target = target_from_params(params)?;
 
     if !result.installed {
-        return Ok(Json(WpNucleiResponse {
+        return serde_json::to_value(WpNucleiResponse {
             url: target,
             installed: false,
             findings: vec![],
             raw: String::new(),
-            error: result.error,
+            error: result.error.clone(),
             duration_ms: result.duration_ms,
-            command: result.command,
+            command: result.command.clone(),
             note: "Install: brew install nuclei && nuclei -update-templates".into(),
-        }));
+        })
+        .map_err(|e| e.to_string());
     }
 
     let mut findings = Vec::new();
@@ -97,22 +115,41 @@ pub async fn wordpress_nuclei(
         if result.stderr.to_lowercase().contains("no templates") {
             Some("No WP templates found. Run: nuclei -update-templates".into())
         } else {
-            result.error
+            result.error.clone()
         }
     } else {
         None
     };
 
-    Ok(Json(WpNucleiResponse {
+    let severity = params
+        .get("severity")
+        .map(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("low,medium,high,critical");
+    let tags = params
+        .get("tags")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "wordpress".into());
+
+    serde_json::to_value(WpNucleiResponse {
         url: target,
         installed: true,
         findings,
         raw: truncate_output(&result.stdout, 50_000),
         error: err,
         duration_ms: result.duration_ms,
-        command: result.command,
-        note: format!(
-            "tags={tags}; severity={severity}; WordPress-focused nuclei pass"
-        ),
-    }))
+        command: result.command.clone(),
+        note: format!("tags={tags}; severity={severity}; WordPress-focused nuclei pass"),
+    })
+    .map_err(|e| e.to_string())
+}
+
+pub async fn wordpress_nuclei(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    Ok(Json(
+        crate::jobs::run_sync(&state, "wordpress-nuclei", params).await?,
+    ))
 }

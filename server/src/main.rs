@@ -1,3 +1,4 @@
+mod jobs;
 mod rag;
 mod tools;
 
@@ -33,6 +34,7 @@ pub struct AppState {
     pub repo_root: PathBuf,
     pub model: Arc<rag::model::ModelServer>,
     pub embeddings: Arc<RwLock<rag::embeddings::EmbeddingIndex>>,
+    pub jobs: Arc<jobs::JobManager>,
 }
 pub struct TantivyIndex {
     pub index: Index,
@@ -624,6 +626,7 @@ async fn main() {
         repo_root,
         model: Arc::new(rag::model::ModelServer::new(model_config)),
         embeddings: Arc::new(RwLock::new(rag::embeddings::EmbeddingIndex::new())),
+        jobs: jobs::JobManager::new(),
     });
 
     // Start file watcher
@@ -641,14 +644,9 @@ async fn main() {
         });
     }
 
-    // Start (or reuse) the local llama-server for RAG chat, without blocking
-    // server startup — the model load can take a few seconds.
-    {
-        let model = state.model.clone();
-        tokio::spawn(async move {
-            model.ensure_running().await;
-        });
-    }
+    // The local llama-server for RAG chat is started on demand from the Ask
+    // panel ("Start model" button) — it isn't auto-spawned here so the vault
+    // can run with no model loaded.
 
     // Restrict CORS to local origins — this tool can read local files / run
     // scanners, so never let arbitrary web pages read API responses.
@@ -666,7 +664,10 @@ async fn main() {
         .route("/api/chat", post(rag::chat::chat))
         .route("/api/chat/stream", post(rag::chat::chat_stream))
         .route("/api/chat/status", get(rag::chat::model_status))
+        .route("/api/chat/model/start", post(rag::chat::start_model))
+        .route("/api/chat/model/stop", post(rag::chat::stop_model))
         .merge(tools::routes())
+        .merge(jobs::routes())
         .layer(cors)
         .with_state(state.clone())
         .fallback_service(ServeDir::new("frontend").append_index_html_on_directories(true));

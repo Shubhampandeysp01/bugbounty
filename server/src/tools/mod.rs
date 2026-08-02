@@ -11,15 +11,20 @@
 //!   web       → website probe / scan / fuzz
 //!   local     → local filesystem secrets & vulns
 
+pub mod attack_surface;
 pub mod common;
+pub mod component_intel;
 pub mod cors_check;
+pub mod cve_lookup;
 pub mod ffuf;
+pub mod findings;
 pub mod gitleaks;
 pub mod httpx;
 pub mod js_analysis;
 pub mod katana;
 pub mod nuclei;
 pub mod open_redirect;
+pub mod result_cache;
 pub mod status;
 pub mod subfinder;
 pub mod trivy;
@@ -34,7 +39,10 @@ pub mod wordpress_users;
 pub mod wordpress_vuln_scan;
 pub mod wordpress_xmlrpc;
 
-use axum::{routing::get, Router};
+use axum::{
+    routing::{delete, get, post, put},
+    Router,
+};
 use std::sync::Arc;
 
 use crate::AppState;
@@ -43,6 +51,11 @@ use crate::AppState;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/tools/status", get(status::tools_status))
+        // Aggregation / visualization
+        .route(
+            "/api/tools/attack-surface",
+            get(attack_surface::attack_surface),
+        )
         // WordPress
         .route("/api/tools/wordpress-check", get(wordpress::wordpress_check))
         .route("/api/tools/wordpress-users", get(wordpress_users::wordpress_users))
@@ -53,6 +66,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(
             "/api/tools/wordpress-themes",
             get(wordpress_themes::wordpress_themes),
+        )
+        .route(
+            "/api/tools/component-intel",
+            get(component_intel::component_intel),
         )
         .route(
             "/api/tools/wordpress-xmlrpc",
@@ -94,4 +111,11 @@ pub fn routes() -> Router<Arc<AppState>> {
         // Local files
         .route("/api/tools/gitleaks", get(gitleaks::gitleaks_scan))
         .route("/api/tools/trivy", get(trivy::trivy_scan))
+        // Intel
+        .route("/api/tools/cve-lookup", get(cve_lookup::cve_lookup))
+        .route("/api/tools/findings", get(findings::list_findings))
+        .route("/api/tools/findings", post(findings::create_finding))
+        .route("/api/tools/findings/{id}", get(findings::get_finding))
+        .route("/api/tools/findings/{id}", put(findings::update_finding))
+        .route("/api/tools/findings/{id}", delete(findings::delete_finding))
 }

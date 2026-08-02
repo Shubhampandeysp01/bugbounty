@@ -121,7 +121,7 @@ pub async fn wordpress_xmlrpc(
         notes.push("XML-RPC looks disabled or filtered — good hardening".into());
     }
 
-    Ok(Json(WpXmlrpcResponse {
+    let resp = WpXmlrpcResponse {
         url: base,
         endpoint,
         available,
@@ -133,7 +133,9 @@ pub async fn wordpress_xmlrpc(
         interesting,
         notes,
         error,
-    }))
+    };
+    super::result_cache::store("wordpress-xmlrpc", &resp.url, &resp);
+    Ok(Json(resp))
 }
 
 fn parse_method_strings(xml: &str) -> Vec<String> {

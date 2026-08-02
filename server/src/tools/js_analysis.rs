@@ -2,13 +2,18 @@
 //! page <script> tags or a direct .js URL. DELETE this file + route + frontend
 //! registry to remove.
 
-use axum::{extract::Query, http::StatusCode, response::Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::Json,
+};
 use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::common::{http_client, normalize_url, safe_prefix, truncate_output};
+use crate::AppState;
 
 const MAX_SCRIPTS: usize = 30;
 const MAX_SCRIPT_BYTES: usize = 2_000_000;
@@ -220,9 +225,12 @@ fn scan_secrets(text: &str) -> Vec<Secret> {
     out
 }
 
-pub async fn js_analysis(
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<JsAnalysisResponse>, (StatusCode, String)> {
+/// Job-Manager contract: the long-running work behind `js_analysis`. Takes
+/// params (not `Query`) and returns an axum-style error so the Job Manager and
+/// the legacy endpoint share one implementation.
+pub async fn js_analysis_core(
+    params: &HashMap<String, String>,
+) -> Result<JsAnalysisResponse, (StatusCode, String)> {
     let started = std::time::Instant::now();
     let url = params
         .get("url")
@@ -319,7 +327,7 @@ pub async fn js_analysis(
         secrets: secrets.len(),
     };
 
-    Ok(Json(JsAnalysisResponse {
+    Ok(JsAnalysisResponse {
         url: target,
         installed: true,
         scripts,
@@ -333,5 +341,14 @@ pub async fn js_analysis(
         error,
         duration_ms: started.elapsed().as_millis() as u64,
         command: "builtin (native HTTP + regex)".into(),
-    }))
+    })
+}
+
+pub async fn js_analysis(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    Ok(Json(
+        crate::jobs::run_sync(&state, "js-analysis", params).await?,
+    ))
 }

@@ -1,10 +1,17 @@
 //! Recon → Subdomain enum (subfinder) — DELETE this file + route + frontend registry to remove.
 
-use axum::{extract::Query, http::StatusCode, response::Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::Json,
+};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use super::common::{normalize_domain, run_cli, truncate_output};
+use super::common::{normalize_domain, truncate_output, CliResult};
+use crate::jobs::CliCtx;
+use crate::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct SubfinderResponse {
@@ -18,23 +25,15 @@ pub struct SubfinderResponse {
     pub command: String,
 }
 
-pub async fn subdomain_enum(
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<SubfinderResponse>, (StatusCode, String)> {
-    let domain = params
-        .get("domain")
-        .or_else(|| params.get("url"))
-        .ok_or_else(|| {
-            (StatusCode::BAD_REQUEST, "Missing 'domain' parameter".to_string())
-        })?;
-    let d = normalize_domain(domain).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
+/// Job-Manager contract: build the CLI argument vector from tool params.
+/// Validation failures return `Err` (→ HTTP 400 on legacy endpoints).
+pub fn build_args(_ctx: &CliCtx, params: &HashMap<String, String>) -> Result<Vec<String>, String> {
+    let domain = domain_from_params(params)?;
     // -all pulls every passive source (needs API keys for best results, slower).
     let use_all = params.get("all").is_some_and(|v| v == "1");
-
     let mut args: Vec<String> = vec![
         "-d".into(),
-        d.clone(),
+        domain,
         "-silent".into(),
         // Cap per-source requests and overall runtime so a slow/broken source
         // doesn't make the API hang for minutes.
@@ -46,20 +45,39 @@ pub async fn subdomain_enum(
     if use_all {
         args.push("-all".into());
     }
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let result = run_cli("subfinder", &arg_refs, 120).await;
+    Ok(args)
+}
+
+fn domain_from_params(params: &HashMap<String, String>) -> Result<String, String> {
+    let domain = params
+        .get("domain")
+        .or_else(|| params.get("url"))
+        .ok_or_else(|| "Missing 'domain' parameter".to_string())?;
+    normalize_domain(domain)
+}
+
+/// Job-Manager contract: turn a `CliResult` into the renderer's JSON. Must
+/// stay byte-identical to the legacy handler response so renderers are
+/// untouched.
+pub fn parse_output(
+    _ctx: &CliCtx,
+    params: &HashMap<String, String>,
+    result: &CliResult,
+) -> Result<serde_json::Value, String> {
+    let d = domain_from_params(params)?;
 
     if !result.installed {
-        return Ok(Json(SubfinderResponse {
+        return serde_json::to_value(SubfinderResponse {
             domain: d,
             installed: false,
             subdomains: vec![],
             count: 0,
             raw: String::new(),
-            error: result.error,
+            error: result.error.clone(),
             duration_ms: result.duration_ms,
-            command: result.command,
-        }));
+            command: result.command.clone(),
+        })
+        .map_err(|e| e.to_string());
     }
 
     let mut seen = HashSet::new();
@@ -76,7 +94,7 @@ pub async fn subdomain_enum(
 
     let err = if subdomains.is_empty() {
         Some(
-            result.error.unwrap_or_else(|| {
+            result.error.clone().unwrap_or_else(|| {
                 "No subdomains found. Add provider API keys to subfinder config for more sources."
                     .into()
             }),
@@ -85,7 +103,7 @@ pub async fn subdomain_enum(
         None
     };
 
-    Ok(Json(SubfinderResponse {
+    serde_json::to_value(SubfinderResponse {
         domain: d,
         installed: true,
         subdomains,
@@ -93,6 +111,16 @@ pub async fn subdomain_enum(
         raw: truncate_output(&result.stdout, 30_000),
         error: err,
         duration_ms: result.duration_ms,
-        command: result.command,
-    }))
+        command: result.command.clone(),
+    })
+    .map_err(|e| e.to_string())
+}
+
+pub async fn subdomain_enum(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    Ok(Json(
+        crate::jobs::run_sync(&state, "subfinder-enum", params).await?,
+    ))
 }

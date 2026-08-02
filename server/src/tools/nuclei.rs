@@ -1,11 +1,18 @@
 //! Websites → Vuln scan (nuclei) — DELETE this file + route + frontend registry to remove.
 
-use axum::{extract::Query, http::StatusCode, response::Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::Json,
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use super::common::{normalize_url, run_cli, truncate_output};
+use super::common::{normalize_url, truncate_output, CliResult};
+use crate::jobs::CliCtx;
+use crate::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct NucleiResponse {
@@ -19,13 +26,9 @@ pub struct NucleiResponse {
     pub note: String,
 }
 
-pub async fn nuclei_scan(
-    Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<NucleiResponse>, (StatusCode, String)> {
-    let url = params
-        .get("url")
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing 'url' parameter".to_string()))?;
-    let target = normalize_url(url).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+/// Job-Manager contract: build the CLI argument vector from tool params.
+pub fn build_args(_ctx: &CliCtx, params: &HashMap<String, String>) -> Result<Vec<String>, String> {
+    let target = target_from_params(params)?;
 
     // Optional severity filter: info,low,medium,high,critical (default medium,high,critical for speed)
     let severity = params
@@ -42,7 +45,7 @@ pub async fn nuclei_scan(
 
     let mut args: Vec<String> = vec![
         "-u".into(),
-        target.clone(),
+        target,
         "-jsonl".into(),
         "-silent".into(),
         "-no-color".into(),
@@ -65,21 +68,36 @@ pub async fn nuclei_scan(
             args.push(t);
         }
     }
+    Ok(args)
+}
 
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let result = run_cli("nuclei", &arg_refs, 120).await;
+fn target_from_params(params: &HashMap<String, String>) -> Result<String, String> {
+    let url = params
+        .get("url")
+        .ok_or_else(|| "Missing 'url' parameter".to_string())?;
+    normalize_url(url)
+}
+
+/// Job-Manager contract: turn a `CliResult` into the renderer's JSON.
+pub fn parse_output(
+    _ctx: &CliCtx,
+    params: &HashMap<String, String>,
+    result: &CliResult,
+) -> Result<serde_json::Value, String> {
+    let target = target_from_params(params)?;
 
     if !result.installed {
-        return Ok(Json(NucleiResponse {
+        return serde_json::to_value(NucleiResponse {
             url: target,
             installed: false,
             findings: vec![],
             raw: String::new(),
-            error: result.error,
+            error: result.error.clone(),
             duration_ms: result.duration_ms,
-            command: result.command,
+            command: result.command.clone(),
             note: "Install: brew install nuclei && nuclei -update-templates".into(),
-        }));
+        })
+        .map_err(|e| e.to_string());
     }
 
     let mut findings = Vec::new();
@@ -98,26 +116,43 @@ pub async fn nuclei_scan(
         if result.stderr.to_lowercase().contains("no templates")
             || result.stderr.to_lowercase().contains("could not find template")
         {
-            Some(
-                "No templates found. Run: nuclei -update-templates".into(),
-            )
+            Some("No templates found. Run: nuclei -update-templates".into())
         } else {
-            result.error.filter(|_| findings.is_empty() && result.stdout.is_empty())
+            result
+                .error
+                .clone()
+                .filter(|_| findings.is_empty() && result.stdout.is_empty())
         }
     } else {
         None
     };
 
-    Ok(Json(NucleiResponse {
+    let severity = params
+        .get("severity")
+        .map(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("medium,high,critical");
+
+    serde_json::to_value(NucleiResponse {
         url: target,
         installed: true,
         findings,
         raw: truncate_output(&result.stdout, 50_000),
         error: err,
         duration_ms: result.duration_ms,
-        command: result.command,
+        command: result.command.clone(),
         note: format!(
             "severity={severity}; no-interactsh; empty findings often means clean or templates missing"
         ),
-    }))
+    })
+    .map_err(|e| e.to_string())
+}
+
+pub async fn nuclei_scan(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    Ok(Json(
+        crate::jobs::run_sync(&state, "nuclei-scan", params).await?,
+    ))
 }

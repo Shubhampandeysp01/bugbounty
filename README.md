@@ -45,7 +45,7 @@ Three paths in one UI:
 - **Streaming answers**: the Ask panel renders the model's reply token-by-token via Server-Sent Events (`POST /api/chat/stream`), so you see the answer as it's generated while source chips appear immediately.
 - **Markdown chunking** (`embeddings.rs`): heading-aware splitting (~900 chars, overlapping) so long guides become focused retrievable sections; the embedding index builds in the background at startup and rebuilds on file change (cache: `.embedding_cache/`, gitignored).
 - **Exact token budgeting**: before generation the prompt is packed to the model's context window using the running tokenizer's own `/tokenize` (binary search on chunk length) so context never overflows `--ctx-size` and output tokens are reserved.
-- `server/rag/model_config.toml` is **the single file that controls the local LLM** — binary path, model GGUF, flags, and per-request settings. Edit it to switch models; the server auto-spawns the model server at startup (or reuses one already running) and the chat endpoint reports 503 until it's ready.
+- `server/rag/model_config.toml` is **the single file that controls the local LLM** — binary path, model GGUF, flags, and per-request settings. Edit it to switch models; the model is started on demand from the Ask panel (or reuses one already running) and the chat endpoint reports 503 until it's ready.
 - Generation runs via any **OpenAI-compatible server** (llama.cpp `llama-server` is the default) and is disabled gracefully if no config/model is available.
 
 **Tool layer** (`server/src/tools/`): each tool is **one module + one route + one registry entry** — modular by design, so tools can be deleted without touching the rest (see `tools/DELETE.md`).
@@ -85,7 +85,10 @@ bugbounty/
 ├── tools/
 │   ├── README.md / DELETE.md    ← install notes / removal guide
 │   ├── wordlists/               ← default ffuf list
-│   └── data/wordfence/          ← local Wordfence DB (gitignored)
+│   └── data/                    ← local vuln DBs (gitignored):
+│       ├── wordfence/           ← Wordfence feed (WF Vuln Scanner)
+│       ├── cves/                ← NVD cache (CVE Lookup)
+│       └── findings/            ← findings store (Findings DB)
 ├── guides/  references/  case-studies/   ← learning content (markdown)
 └── .secrets/                    ← API keys (gitignored)
 ```
@@ -100,9 +103,9 @@ cd server && cargo build --release && cd ..   # build (first time / after change
 ./start.sh                                    # serves http://localhost:3000
 ```
 
-**Ask (RAG) needs a local LLM.** Point `server/rag/model_config.toml` at a GGUF model + a llama.cpp `llama-server` binary, then start the vault — it auto-spawns the model server on port 8080 (or reuses one already running). The Ask panel shows the model status, and chat returns 503 with a hint until the model finishes loading.
+**Ask (RAG) needs a local LLM.** Point `server/rag/model_config.toml` at a GGUF model + a llama.cpp `llama-server` binary, then open the **Ask** tab and click **Start model** — the vault spawns llama-server on port 8080 (or reuses one already running). The status dot in the Ask panel shows offline → loading → ready, and chat returns 503 with a hint until the model is up. The model is only started on demand, so the vault runs fine without it loaded.
 
-**Model lifecycle:** the vault shuts the llama-server down when it exits — on Ctrl+C (SIGINT) or SIGTERM it drains in-flight requests, then stops the model server it spawned (no orphaned processes). If you started llama-server yourself, it is reused and left running.
+**Model lifecycle:** the model is started on demand via **Start model** in the Ask panel (`POST /api/chat/model/start`, non-blocking) and stopped via **Stop model** (`POST /api/chat/model/stop`). The vault shuts down any model it spawned when the vault exits — on Ctrl+C (SIGINT) or SIGTERM it drains in-flight requests, then stops the model server it spawned (no orphaned processes). If you started llama-server yourself, it is reused, shown as an external instance, and left running.
 
 ```toml
 # server/rag/model_config.toml  (defaults already set for Qwen3.5-9B)
@@ -151,11 +154,11 @@ Suggested learning path lives in `guides/` (methodology → web appsec → explo
 - Chat with your library: question → **hybrid retrieval** (BM25 + dense embeddings, RRF merge) + **cross-encoder rerank** over the index → grounded prompt → **streaming** local LLM answer with **clickable source citations**.
 - Heading-aware chunking + exact token budgeting so long docs fit the model's context window without overflow.
 - One editable config file (`server/rag/model_config.toml`) controls the model: binary, GGUF path, flags, temperature, max tokens, thinking mode.
-- Works with **any OpenAI-compatible server** (llama.cpp `llama-server` by default); auto-spawns it, reuses an existing instance, and degrades to a clear 503 if the model isn't available.
+- Model runs only on demand — **Start model** / **Stop model** buttons in the Ask panel (with live offline→loading→ready status); the vault never spawns it unless you ask. Works with **any OpenAI-compatible server** (llama.cpp `llama-server` by default); reuses an external instance and degrades to a clear 503 if the model isn't running.
 
 ### Tool layer
 
-20 tools across 4 categories. Builtin tools need **no binaries**; CLI tools show an install hint in the UI if the binary is missing.
+22 tools across 5 categories. Builtin tools need **no binaries**; CLI tools show an install hint in the UI if the binary is missing.
 
 | Category | Tools |
 |----------|-------|
@@ -207,6 +210,21 @@ Suggested learning path lives in `guides/` (methodology → web appsec → explo
 | **Secrets Scan** (`gitleaks`) | CLI | Scans a folder/git repo for secrets; default path `.` | Needs `gitleaks`. Paths are resolved against the repo root; `..` escapes are rejected |
 | **FS Vuln Scan** (`trivy`) | CLI | `trivy fs` for HIGH/CRITICAL vulns, secrets, misconfigs | Needs `trivy`; first run downloads the DB (network). First run can be slow |
 
+| Category | Tools |
+|----------|-------|
+| **Recon** | Subdomain Enum, Archive URLs, Crawler, JS Analysis |
+| **WordPress** | Version Check, User Enum, Plugin Enum, Theme Enum, XML-RPC Probe, Sensitive Paths, REST Surface, WP Nuclei Scan, WF Vuln Scanner |
+| **Websites** | Live Probe, Vuln Scan, Path Fuzz, CORS Check, Open Redirect |
+| **Local Files** | Secrets Scan, FS Vuln Scan |
+| **Intel** | CVE Lookup, Findings DB |
+
+### Intel
+
+| Tool | Kind | How it works | Constraints |
+|------|------|--------------|-------------|
+| **CVE Lookup** | Builtin | Looks up a CVE ID (e.g. `CVE-2024-1234`) or keyword-searches the **NVD 2.0 API**. Normalizes `CVE-YYYY-NNNNN`, returns description, CVSS (v2/v3/v4), CWEs, and references. Records are cached on disk (`tools/data/cves/<CVE-ID>.json`, 24 h TTL) so repeat lookups work offline and can prefill the findings DB. | Needs network on first lookup of a CVE. **Save to findings** button pushes the record straight into the Findings DB. |
+| **Findings DB** | Builtin | Persistent local store (`tools/data/findings/findings.json`, gitignored) of confirmed findings: title, target, vuln type, severity, status, CVE/CVSS, affected endpoint, description, remediation, references, tags, timestamps. Create / edit / delete from the UI; list filtered by `q` / `severity` / `status`. | JSON file only — no RAG integration (deliberate). Delete a finding is permanent. |
+
 ### Tool inputs & safety
 
 - All CLI tools run via `Command` with **no shell**; arguments are constructed from validated input (charset + length checks).
@@ -224,9 +242,17 @@ GET  /api/file?path=..   rendered markdown
 GET  /api/search?q=..    full-text search
 GET  /api/stats          file counts
 POST /api/chat           RAG chat: {"message": "...", "limit": 5}
-GET  /api/chat/status    model server health: {"ready": true, ...}
+GET  /api/chat/status    model health + managed/starting state
+POST /api/chat/model/start   start the model server (non-blocking)
+POST /api/chat/model/stop    stop the spawned model server
 GET  /api/tools/status   install status of every tool
 GET  /api/tools/<tool>?<input>   run a tool (see registry for params)
+GET  /api/tools/cve-lookup?cve=CVE-2021-44228   NVD lookup (or ?q=keyword)
+GET  /api/tools/findings           list findings (?q=&severity=&status=)
+GET  /api/tools/findings/{id}      one finding
+POST /api/tools/findings           create  (JSON body)
+PUT  /api/tools/findings/{id}      update  (JSON body)
+DELETE /api/tools/findings/{id}    delete
 ```
 
 Example: `curl -s "http://localhost:3000/api/tools/subfinder?url=example.com" | jq`
@@ -245,7 +271,7 @@ lsof -i :3000 -t | xargs kill   # stop old instance first
 
 ## Secrets & gitignore
 
-Never commit: `.secrets/`, `tools/data/wordfence/`, `.env*`, `.search_index/`.
+Never commit: `.secrets/`, `tools/data/wordfence/`, `tools/data/cves/`, `tools/data/findings/`, `.env*`, `.search_index/`.
 
 ---
 

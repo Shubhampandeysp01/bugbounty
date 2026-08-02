@@ -407,11 +407,13 @@ pub async fn wordpress_paths(
     notes.push(format!("Probed {} sensitive WordPress paths", PATHS.len()));
     notes.push(format!("{} interesting responses", findings.len()));
 
-    Ok(Json(WpPathsResponse {
+    let resp = WpPathsResponse {
         url: base,
         findings,
         probed: PATHS.len(),
         notes,
         error,
-    }))
+    };
+    super::result_cache::store("wordpress-paths", &resp.url, &resp);
+    Ok(Json(resp))
 }
