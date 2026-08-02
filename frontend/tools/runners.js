@@ -407,7 +407,7 @@ window.VAULT_TOOL_RUNNERS = {
         );
       } else {
         vulnList = `<p class="tool-note">Vulnerabilities — click a row for full details</p>` +
-          vulnShortCards(findings);
+          vulnShortCards(findings, { target: data.url || '' });
       }
 
       const dbLine = data.db
@@ -594,6 +594,7 @@ window.VAULT_TOOL_RUNNERS = {
         return missing(data, 'cors-check');
       }
       const tests = data.tests || [];
+      const target = data.url || '';
       let list = '';
       if (!tests.length) {
         list = emptyMsg('No tests run.');
@@ -607,11 +608,31 @@ window.VAULT_TOOL_RUNNERS = {
             const cred = t.allow_credentials
               ? ' · ⚠️ Allow-Credentials: true'
               : '';
+            const risky = ['critical', 'high', 'medium'].includes(String(sev).toLowerCase());
+            const save = risky
+              ? saveFindingBtn({
+                  title: `CORS: ${t.name || 'misconfiguration'}`,
+                  target,
+                  severity: sev === 'ok' ? 'info' : sev,
+                  vuln_type: 'cors',
+                  endpoint: target,
+                  description: [
+                    t.note,
+                    t.origin ? `Probed Origin: ${t.origin}` : '',
+                    t.allow_origin ? `ACAO: ${t.allow_origin}` : '',
+                    t.allow_credentials ? 'Allow-Credentials: true' : '',
+                  ]
+                    .filter(Boolean)
+                    .join('\n'),
+                  tags: 'cors,web',
+                })
+              : '';
             return `<div class="finding-row sev-${escapeHtml(sev)}">
               <span class="finding-sev">${escapeHtml(sev)}</span>
               <div class="finding-body">
                 <div class="finding-name">${escapeHtml(t.name)} <code class="mono">${escapeHtml(t.origin)}</code></div>
                 <div class="finding-meta">${escapeHtml(t.note)}${ao}${cred}</div>
+                ${save}
               </div>
             </div>`;
           })
@@ -640,6 +661,7 @@ window.VAULT_TOOL_RUNNERS = {
         return missing(data, 'open-redirect');
       }
       const tests = data.tests || [];
+      const target = data.url || '';
       let list = '';
       if (!tests.length) {
         list = emptyMsg('No tests run.');
@@ -650,12 +672,30 @@ window.VAULT_TOOL_RUNNERS = {
             const loc = t.location
               ? `<div class="finding-meta mono">Location: ${escapeHtml(t.location)}</div>`
               : '';
+            const save = t.vulnerable
+              ? saveFindingBtn({
+                  title: `Open redirect via ?${t.param}=`,
+                  target,
+                  severity: 'high',
+                  vuln_type: 'open-redirect',
+                  endpoint: t.url || target,
+                  description: [
+                    t.note,
+                    t.location ? `Location: ${t.location}` : '',
+                    t.status != null ? `HTTP ${t.status}` : '',
+                  ]
+                    .filter(Boolean)
+                    .join('\n'),
+                  tags: 'open-redirect,web',
+                })
+              : '';
             return `<div class="finding-row sev-${escapeHtml(sev)}">
               <span class="finding-sev">${escapeHtml(t.vulnerable ? 'open' : t.status != null ? String(t.status) : 'err')}</span>
               <div class="finding-body">
                 <div class="finding-name mono">?${escapeHtml(t.param)}=</div>
                 <div class="finding-meta">${escapeHtml(t.note)}</div>
                 ${loc}
+                ${save}
               </div>
             </div>`;
           })
@@ -672,6 +712,115 @@ window.VAULT_TOOL_RUNNERS = {
         </div>` +
         verdict +
         list +
+        (data.error ? `<div class="tool-error">${escapeHtml(data.error)}</div>` : '')
+      );
+    },
+
+    'security-headers'(data) {
+      if (data.error && !(data.headers && data.headers.length)) {
+        return (
+          metaBar(data) +
+          `<div class="tool-error">${escapeHtml(data.error)}</div>`
+        );
+      }
+      const target = data.url || '';
+      const headers = data.headers || [];
+      const cookies = data.cookies || [];
+      const headerList = headers.length
+        ? `<div class="findings-list">${headers
+            .map((h) => {
+              const sev = h.severity || (h.present ? 'info' : 'medium');
+              const save =
+                !h.present && sev !== 'info'
+                  ? saveFindingBtn({
+                      title: `Missing header: ${h.name}`,
+                      target,
+                      severity: sev,
+                      vuln_type: 'security-headers',
+                      endpoint: target,
+                      description: h.note || `Missing ${h.name}`,
+                      remediation: `Add the ${h.name} response header.`,
+                      tags: 'security-headers,headers,web',
+                    })
+                  : h.present && sev !== 'info'
+                    ? saveFindingBtn({
+                        title: `Weak header: ${h.name}`,
+                        target,
+                        severity: sev,
+                        vuln_type: 'security-headers',
+                        endpoint: target,
+                        description: [h.note, h.value ? `Value: ${h.value}` : '']
+                          .filter(Boolean)
+                          .join('\n'),
+                        tags: 'security-headers,headers,web',
+                      })
+                    : '';
+              return `<div class="finding-row sev-${escapeHtml(sev)}">
+                <span class="finding-sev">${escapeHtml(h.present ? 'ok' : 'miss')}</span>
+                <div class="finding-body">
+                  <div class="finding-name mono">${escapeHtml(h.name)}</div>
+                  <div class="finding-meta">${escapeHtml(h.note || '')}</div>
+                  ${h.value ? `<div class="finding-meta mono">${escapeHtml(h.value)}</div>` : ''}
+                  ${save}
+                </div>
+              </div>`;
+            })
+            .join('')}</div>`
+        : emptyMsg('No header results.');
+
+      const cookieList = cookies.length
+        ? `<p class="tool-note">Cookies (${cookies.length})</p>
+           <div class="findings-list">${cookies
+             .map((c) => {
+               const sev = c.severity || 'info';
+               const flags = [
+                 c.secure ? 'Secure' : 'no-Secure',
+                 c.http_only ? 'HttpOnly' : 'no-HttpOnly',
+                 c.same_site ? `SameSite=${c.same_site}` : 'no-SameSite',
+               ].join(' · ');
+               const save =
+                 sev !== 'info'
+                   ? saveFindingBtn({
+                       title: `Weak cookie flags: ${c.name}`,
+                       target,
+                       severity: sev,
+                       vuln_type: 'cookie-flags',
+                       endpoint: target,
+                       description: [c.note, `Flags: ${flags}`, c.raw ? `Set-Cookie: ${c.raw}` : '']
+                         .filter(Boolean)
+                         .join('\n'),
+                       remediation:
+                         'Set Secure (HTTPS), HttpOnly, and SameSite=Lax or Strict unless cross-site is required.',
+                       tags: 'cookies,security-headers,web',
+                     })
+                   : '';
+               return `<div class="finding-row sev-${escapeHtml(sev)}">
+                 <span class="finding-sev">${escapeHtml(sev)}</span>
+                 <div class="finding-body">
+                   <div class="finding-name mono">${escapeHtml(c.name)}</div>
+                   <div class="finding-meta">${escapeHtml(flags)}</div>
+                   <div class="finding-meta">${escapeHtml(c.note || '')}</div>
+                   ${save}
+                 </div>
+               </div>`;
+             })
+             .join('')}</div>`
+        : `<p class="tool-note">No Set-Cookie headers on this response.</p>`;
+
+      return (
+        metaBar(data) +
+        `<div class="tool-results-grid">
+          ${card('Status', data.status != null ? String(data.status) : '—')}
+          ${card('Overall', data.overall || '—')}
+          ${card('Missing / weak headers', String(data.missing_count ?? 0))}
+          ${card('Weak cookies', String(data.weak_cookie_count ?? 0))}
+        </div>` +
+        (data.final_url && data.final_url !== target
+          ? `<p class="tool-note">Final URL: <code>${escapeHtml(data.final_url)}</code></p>`
+          : '') +
+        `<p class="tool-note">Security headers</p>` +
+        headerList +
+        cookieList +
         (data.error ? `<div class="tool-error">${escapeHtml(data.error)}</div>` : '')
       );
     },
@@ -705,6 +854,7 @@ window.VAULT_TOOL_RUNNERS = {
         return missing(data, 'nuclei');
       }
       const findings = data.findings || [];
+      const target = data.url || '';
       let list = '';
       if (findings.length === 0) {
         list = emptyMsg('No findings at selected severity (or templates not installed).');
@@ -715,11 +865,47 @@ window.VAULT_TOOL_RUNNERS = {
             const name = info.name || f['template-id'] || f.template_id || 'Finding';
             const sev = (info.severity || 'unknown').toLowerCase();
             const matched = f['matched-at'] || f.matched_at || f.host || '';
+            const tid = f['template-id'] || f.template_id || '';
+            const cve =
+              (Array.isArray(info.classification?.['cve-id'])
+                ? info.classification['cve-id'][0]
+                : null) ||
+              (Array.isArray(info.tags)
+                ? info.tags.find((t) => /^cve-\d{4}-\d+/i.test(t))
+                : null) ||
+              '';
+            const refs = []
+              .concat(info.reference || [])
+              .concat(Array.isArray(info.reference) ? [] : [])
+              .flat()
+              .filter(Boolean)
+              .slice(0, 8)
+              .join('\n');
+            const save = saveFindingBtn({
+              title: name,
+              target,
+              severity: sev === 'unknown' || sev === 'info' ? 'info' : sev,
+              vuln_type: 'nuclei',
+              cve,
+              endpoint: matched || target,
+              description: [
+                info.description || '',
+                tid ? `Template: ${tid}` : '',
+                matched ? `Matched at: ${matched}` : '',
+                info.remediation ? `Remediation: ${info.remediation}` : '',
+              ]
+                .filter(Boolean)
+                .join('\n'),
+              remediation: info.remediation || '',
+              references: refs,
+              tags: ['nuclei', ...(Array.isArray(info.tags) ? info.tags.slice(0, 6) : [])].join(','),
+            });
             return `<div class="finding-row sev-${escapeHtml(sev)}">
               <span class="finding-sev">${escapeHtml(sev)}</span>
               <div class="finding-body">
                 <div class="finding-name">${escapeHtml(name)}</div>
                 <div class="finding-meta">${escapeHtml(matched)}</div>
+                ${save}
               </div>
             </div>`;
           })
@@ -900,18 +1086,17 @@ window.VAULT_TOOL_RUNNERS = {
                 ${cwes ? `<div class="finding-meta">CWE: ${cwes}</div>` : ''}
                 ${published ? `<div class="finding-meta">Published: ${published}</div>` : ''}
                 ${refs ? `<div class="finding-meta">${refs}</div>` : ''}
-                <div class="finding-actions">
-                  <button type="button" class="btn-ghost btn-xs" data-finding-save
-                    data-title="${escapeHtml(r.cve_id + ': ' + truncate(r.description, 140))}"
-                    data-cve="${escapeHtml(r.cve_id)}"
-                    data-cvss="${score ? score.base_score : ''}"
-                    data-severity="${score ? score.severity.toLowerCase() : ''}"
-                    data-description="${escapeHtml(r.description || '')}"
-                    data-references="${escapeHtml((r.references || []).map((x) => x.url).join('\n'))}"
-                    data-endpoint="${escapeHtml(r.description.match(/in ([^\s.]+)/)?.[1] || '')}">
-                    Save to findings
-                  </button>
-                </div>
+                ${saveFindingBtn({
+                  title: r.cve_id + ': ' + truncate(r.description, 140),
+                  cve: r.cve_id,
+                  cvss: score ? score.base_score : '',
+                  severity: score ? score.severity.toLowerCase() : 'medium',
+                  description: r.description || '',
+                  references: (r.references || []).map((x) => x.url).join('\n'),
+                  endpoint: (r.description || '').match(/in ([^\s.]+)/)?.[1] || '',
+                  vuln_type: 'cve',
+                  tags: 'cve,nvd',
+                })}
               </div>
             </div>`;
           })
@@ -1124,11 +1309,12 @@ function metaCell(label, html) {
 }
 
 // Renders the lazy-loaded /api/tools/component-intel payload inside a card body.
-function renderComponentIntel(d) {
+function renderComponentIntel(d, opts) {
   if (d.error && !d.name) {
     return `<div class="comp-error">${escapeHtml(d.error)}</div>` +
       notesList(d.notes);
   }
+  const target = (opts && opts.target) || '';
   const inst = d.detected_version
     ? `v${escapeHtml(d.detected_version)}`
     : 'unknown';
@@ -1178,7 +1364,7 @@ function renderComponentIntel(d) {
     vulnBlock = `<p class="tool-note">No matching vulnerabilities in the Wordfence DB for <code>v${escapeHtml(d.detected_version)}</code>.</p>`;
   } else {
     vulnBlock = `<p class="tool-note">Vulnerabilities (${d.vulnerabilities.length}) — click a row for full details</p>` +
-      vulnShortCards(d.vulnerabilities);
+      vulnShortCards(d.vulnerabilities, { target });
   }
 
   return grid + tags + vulnBlock + (d.notes && d.notes.length ? notesList(d.notes) : '');
@@ -1186,7 +1372,9 @@ function renderComponentIntel(d) {
 
 // Shared short vulnerability cards — used by the WF scan renderer and the
 // lazily-enriched component cards (both rely on app.js [data-vuln-open]).
-function vulnShortCards(findings) {
+// opts.target: site URL for Save to Findings.
+function vulnShortCards(findings, opts) {
+  const target = (opts && opts.target) || '';
   return `<div class="findings-list vuln-short-list">${findings
     .map((f, i) => {
       const rating = (f.cvss_rating || 'none').toLowerCase();
@@ -1207,13 +1395,45 @@ function vulnShortCards(findings) {
         : 'Unpatched';
       const affected = (f.affected_versions || []).join(', ') || '—';
       const remShort = (f.remediation || '').slice(0, 90);
-      return `<button type="button" class="finding-row sev-${sevClass} vuln-short-card"
+      const refs = []
+        .concat(f.references || [])
+        .concat(f.cve_link ? [f.cve_link] : [])
+        .filter(Boolean)
+        .slice(0, 8)
+        .join('\n');
+      const save = saveFindingBtn({
+        title: f.title || cve || 'WordPress vulnerability',
+        target,
+        severity: sevClass === 'info' ? 'medium' : sevClass,
+        vuln_type: `wordpress-${f.software_type || 'component'}`,
+        cve: f.cve || '',
+        cvss: f.cvss_score != null ? f.cvss_score : '',
+        endpoint: f.slug
+          ? `${f.software_type || 'component'}:${f.slug}@${f.detected_version || '?'}`
+          : '',
+        description: [
+          f.description || '',
+          f.software_type || f.slug
+            ? `Component: ${f.software_type || ''} ${f.slug || ''} v${f.detected_version || '?'}`
+            : '',
+          affected !== '—' ? `Affected: ${affected}` : '',
+          patch,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        remediation: f.remediation || '',
+        references: refs,
+        tags: ['wordpress', 'wordfence', f.software_type, f.slug].filter(Boolean).join(','),
+      });
+      return `<div class="finding-row sev-${sevClass} vuln-short-card"
           data-vuln-open
           data-vuln-id="${escapeHtml(f.id)}"
           data-software-type="${escapeHtml(f.software_type || '')}"
           data-slug="${escapeHtml(f.slug || '')}"
           data-detected-version="${escapeHtml(f.detected_version || '')}"
-          data-idx="${i}">
+          data-idx="${i}"
+          role="button"
+          tabindex="0">
         <span class="finding-sev">${escapeHtml(f.cvss_rating || 'n/a')} ${escapeHtml(score)}</span>
         <div class="finding-body">
           <div class="finding-name">
@@ -1229,10 +1449,25 @@ function vulnShortCards(findings) {
           </div>
           ${remShort ? `<div class="vuln-short-rem">${escapeHtml(remShort)}${(f.remediation || '').length > 90 ? '…' : ''}</div>` : ''}
           <div class="vuln-short-cta">View full details →</div>
+          ${save}
         </div>
-      </button>`;
+      </div>`;
     })
     .join('')}</div>`;
+}
+
+/** Build a "Save to findings" control with data-* payload for app.js. */
+function saveFindingBtn(fields) {
+  const f = fields || {};
+  const attr = (name, val) => {
+    if (val == null || val === '') return '';
+    return ` data-${name}="${escapeHtml(String(val))}"`;
+  };
+  return `<div class="finding-actions">
+    <button type="button" class="btn-ghost btn-xs" data-finding-save${attr('title', f.title)}${attr('target', f.target)}${attr('severity', f.severity)}${attr('vuln-type', f.vuln_type)}${attr('cve', f.cve)}${attr('cvss', f.cvss)}${attr('endpoint', f.endpoint)}${attr('description', f.description)}${attr('remediation', f.remediation)}${attr('references', f.references)}${attr('tags', f.tags)}>
+      Save to findings
+    </button>
+  </div>`;
 }
 
 function truncate(s, n) {

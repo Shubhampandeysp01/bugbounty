@@ -280,7 +280,12 @@ impl JobManager {
         self.jobs.read().unwrap().get(id).map(|j| j.view())
     }
 
-    pub fn result(&self, id: &str) -> Option<(JobStatus, Option<Value>, Option<String>)> {
+    /// Returns `(status, result, error, param_error)`.
+    /// `param_error` is true when validation failed (callers should map to HTTP 400).
+    pub fn result(
+        &self,
+        id: &str,
+    ) -> Option<(JobStatus, Option<Value>, Option<String>, bool)> {
         let j = {
             let jobs = self.jobs.read().unwrap();
             jobs.get(id)?.clone()
@@ -288,7 +293,8 @@ impl JobManager {
         let status = j.status();
         let result = j.result.read().unwrap().clone();
         let error = j.error.read().unwrap().clone();
-        Some((status, result, error))
+        let param_error = j.param_error.load(Ordering::SeqCst);
+        Some((status, result, error, param_error))
     }
 
     pub fn logs(&self, id: &str) -> Option<Vec<String>> {
@@ -376,11 +382,18 @@ async fn get_result(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     match state.jobs.result(&id) {
-        Some((_, Some(v), _)) => Ok(Json(v)),
-        Some((status, _, err)) => Err((
-            StatusCode::from_job_status(status),
-            err.unwrap_or_else(|| format!("Job not finished ({})", status.as_str())),
-        )),
+        Some((_, Some(v), _, _)) => Ok(Json(v)),
+        Some((status, _, err, param_error)) => {
+            let code = if param_error {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::from_job_status(status)
+            };
+            Err((
+                code,
+                err.unwrap_or_else(|| format!("Job not finished ({})", status.as_str())),
+            ))
+        }
         None => Err((StatusCode::NOT_FOUND, "Job not found".to_string())),
     }
 }
@@ -461,12 +474,17 @@ pub async fn run_sync(
     loop {
         tokio::time::sleep(Duration::from_millis(150)).await;
         match state.jobs.result(&id) {
-            Some((JobStatus::Succeeded, Some(v), _)) => return Ok(v),
-            Some((status, _, err)) if status.terminal() => {
+            Some((JobStatus::Succeeded, Some(v), _, _)) => return Ok(v),
+            Some((status, _, err, param_error)) if status.terminal() => {
+                let code = if param_error {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::from_job_status(status)
+                };
                 return Err((
-                    StatusCode::from_job_status(status),
+                    code,
                     err.unwrap_or_else(|| format!("Job failed ({})", status.as_str())),
-                ))
+                ));
             }
             None => return Err((StatusCode::NOT_FOUND, "Job vanished".to_string())),
             _ => {}

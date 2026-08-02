@@ -27,7 +27,7 @@ Three paths in one UI:
 ```
 
 **Server** (`server/`, Rust / axum / Tokio / Tantivy):
-- Serves the static UI **and** a JSON API on `0.0.0.0:3000`.
+- Serves the static UI **and** a JSON API on `127.0.0.1:3000` by default (override with `BUGBOUNTY_BIND`).
 - Builds a **Tantivy full-text index** of all `*.md` files at startup; a `notify` file watcher re-indexes on edits (thread-based, debounced).
 - `/api/tree`, `/api/file`, `/api/search`, `/api/stats` — knowledge layer.
 - `/api/tools/*` — one route per tool, merged from `tools::routes()`.
@@ -133,7 +133,7 @@ go install github.com/projectdiscovery/katana/cmd/katana@latest
 ### Constraints
 
 - **One server at a time.** Tantivy's index uses a file lock — a second instance fails with `LockFailure(LockBusy)`. Fix: `lsof -i :3000 -t | xargs kill`, and `rm -f .search_index/.tantivy-*.lock` if a stale lock lingers.
-- Server is **local-only by design** (CORS-restricted; reads local files, runs local scanners). Don't expose it publicly.
+- Server is **local-only by design**: binds `127.0.0.1:3000` by default (set `BUGBOUNTY_BIND=0.0.0.0:3000` only if you intentionally want LAN access), CORS-restricted, reads local files, runs local scanners. Don't expose it publicly.
 - **Only scan systems you own or have explicit permission to test.**
 
 ---

@@ -947,6 +947,7 @@ function closeVulnDetailToScan({ push = true } = {}) {
 // Click short CVE cards inside tools panel
 if (dom.toolsPanel) {
   dom.toolsPanel.addEventListener('click', (e) => {
+    if (e.target.closest('[data-finding-save]')) return;
     const btn = e.target.closest('[data-vuln-open]');
     if (!btn) return;
     e.preventDefault();
@@ -980,11 +981,14 @@ if (dom.toolsPanel) {
       slug: card.dataset.compSlug,
     });
     if (card.dataset.compVersion) q.set('version', card.dataset.compVersion);
+    const pane = card.closest('.tool-pane');
+    const targetInput = pane && pane.querySelector('[data-primary="1"]');
+    const targetUrl = targetInput ? targetInput.value.trim() : '';
     fetch(`/api/tools/component-intel?${q.toString()}`)
       .then((r) => r.json())
       .then((data) => {
         if (!document.body.contains(body)) return;
-        body.innerHTML = window.renderComponentIntel(data);
+        body.innerHTML = window.renderComponentIntel(data, { target: targetUrl });
       })
       .catch((err) => {
         if (!document.body.contains(body)) return;
@@ -1120,25 +1124,50 @@ if (dom.toolsPanel) {
       });
       return;
     }
-    const saveCve = e.target.closest('[data-finding-save]');
-    if (saveCve) {
+    const saveBtn = e.target.closest('[data-finding-save]');
+    if (saveBtn) {
       e.preventDefault();
-      findingsFetch('/api/tools/findings', 'POST', {
-        title: saveCve.dataset.title || saveCve.dataset.cve || 'CVE finding',
-        cve_id: saveCve.dataset.cve || '',
-        cvss_score: Number(saveCve.dataset.cvss || 0),
-        severity: saveCve.dataset.severity || 'medium',
-        endpoint: saveCve.dataset.endpoint || '',
-        description: saveCve.dataset.description || '',
-        references: (saveCve.dataset.references || '').split('\n').filter(Boolean),
+      e.stopPropagation();
+      if (saveBtn.disabled) return;
+      const tags = (saveBtn.dataset.tags || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const payload = {
+        title: saveBtn.dataset.title || saveBtn.dataset.cve || 'Finding',
+        target: saveBtn.dataset.target || '',
+        vuln_type: saveBtn.dataset.vulnType || '',
+        cve_id: saveBtn.dataset.cve || saveBtn.dataset.cveId || '',
+        cvss_score: Number(saveBtn.dataset.cvss || saveBtn.dataset.cvssScore || 0),
+        severity: (saveBtn.dataset.severity || 'medium').toLowerCase(),
+        endpoint: saveBtn.dataset.endpoint || '',
+        description: saveBtn.dataset.description || '',
+        remediation: saveBtn.dataset.remediation || '',
+        references: (saveBtn.dataset.references || '')
+          .split('\n')
+          .map((s) => s.trim())
+          .filter(Boolean),
+        tags,
         status: 'open',
-      }).then((d) => {
+      };
+      saveBtn.disabled = true;
+      const prev = saveBtn.textContent;
+      saveBtn.textContent = 'Saving…';
+      findingsFetch('/api/tools/findings', 'POST', payload).then((d) => {
         if (!d.ok) {
           alert('Save failed: ' + (d.error || 'unknown error'));
+          saveBtn.disabled = false;
+          saveBtn.textContent = prev;
           return;
         }
-        saveCve.textContent = 'Saved ✓';
-        saveCve.disabled = true;
+        saveBtn.textContent = 'Saved ✓';
+        if (window.VaultJobs && window.VaultJobs.toast) {
+          window.VaultJobs.toast('Saved to Findings', {
+            type: 'ok',
+            body: payload.title.slice(0, 80),
+            timeout: 3500,
+          });
+        }
       });
       return;
     }

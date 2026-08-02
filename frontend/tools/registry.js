@@ -421,6 +421,24 @@ window.VAULT_TOOLS = {
           endpoint: '/api/tools/open-redirect',
           render: 'open-redirect',
         },
+        {
+          id: 'security-headers',
+          label: 'Security Headers',
+          desc: 'Headers + cookie flags',
+          badge: 'Config',
+          title: 'Security Headers & Cookies',
+          blurb:
+            'Probe response security headers (HSTS, CSP, XFO, …) and Set-Cookie flags (Secure, HttpOnly, SameSite). Missing or weak items can be saved to Findings.',
+          binary: null,
+          input: {
+            type: 'url',
+            name: 'url',
+            placeholder: 'https://example.com',
+            label: 'Target URL',
+          },
+          endpoint: '/api/tools/security-headers',
+          render: 'security-headers',
+        },
       ],
     },
     {

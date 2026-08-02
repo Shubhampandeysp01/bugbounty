@@ -38,6 +38,7 @@ pub const TOOL_CATALOG: &[(&str, &str, &str, &str)] = &[
     ("ffuf-fuzz", "ffuf", "web", "Path Fuzz"),
     ("cors-check", "", "web", "CORS Check"),
     ("open-redirect", "", "web", "Open Redirect"),
+    ("security-headers", "", "web", "Security Headers"),
     // Recon
     ("subfinder-enum", "subfinder", "recon", "Subdomain Enum"),
     ("waybackurls-mine", "waybackurls", "recon", "Archive URLs"),

@@ -161,11 +161,19 @@ fn hybrid_retrieve(state: &Arc<AppState>, query: &str, limit: usize) -> Vec<Retr
     for c in bm25 {
         bm25_by_path.entry(c.path.clone()).or_insert(c);
     }
-    // Dense chunks give finer context; keep them when present for a path.
+    // Dense chunks give finer context; keep the highest-scoring chunk per path
+    // (or_insert kept the first hit, which is not necessarily the best).
     let mut dense_by_path: std::collections::HashMap<String, (String, String, String, f32)> =
         std::collections::HashMap::new();
     for (path, title, text, score) in dense {
-        dense_by_path.entry(path.clone()).or_insert((path, title, text, score));
+        dense_by_path
+            .entry(path.clone())
+            .and_modify(|existing| {
+                if score > existing.3 {
+                    *existing = (path.clone(), title.clone(), text.clone(), score);
+                }
+            })
+            .or_insert((path, title, text, score));
     }
 
     let candidates: Vec<(String, String, String, f32)> = merged
@@ -308,7 +316,8 @@ async fn build_prompt(
 pub async fn chat(
     State(state): State<Arc<AppState>>,
     Json(query): Json<ChatQuery>,
-) -> Result<Json<Value>, (StatusCode, String)> {    let message = query.message.trim();
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let message = query.message.trim();
     if message.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "Message cannot be empty".to_string()));
     }

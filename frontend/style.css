@@ -1172,7 +1172,8 @@ body.sidebar-drawer-open {
 }
 
 /* Short CVE list cards */
-button.vuln-short-card {
+button.vuln-short-card,
+div.vuln-short-card {
   width: 100%;
   text-align: left;
   font: inherit;

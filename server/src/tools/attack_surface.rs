@@ -214,7 +214,7 @@ fn job_value(state: &Arc<AppState>, tool: &str, url: &str) -> Option<Value> {
         if !same_url(pu, url) {
             continue;
         }
-        if let Some((_, Some(r), _)) = state.jobs.result(&v.id) {
+        if let Some((_, Some(r), _, _)) = state.jobs.result(&v.id) {
             return Some(r);
         }
     }

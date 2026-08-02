@@ -264,9 +264,11 @@ pub async fn run_cli_stream(
     let stdout = stdout_buf;
     let stderr = stderr_buf;
 
-    // Soft-ok logic mirrors `run_cli` so the parse layer behaves identically.
+    // Soft-ok: treat non-empty stdout as success for tools that print findings
+    // even when exit codes are non-zero (common with scanners). Never soft-ok
+    // on cancel/timeout — partial stdout would otherwise mask the failure.
     let has_stdout = !stdout.trim().is_empty();
-    let soft_ok = has_stdout;
+    let soft_ok = has_stdout && !cancelled && !timed_out;
 
     let error = if soft_ok {
         None
@@ -283,17 +285,15 @@ pub async fn run_cli_stream(
             .take(3)
             .collect::<Vec<_>>()
             .join(" | ");
-        Some(if hint.is_empty() {
-            if cancelled {
-                "Cancelled".to_string()
-            } else if timed_out {
-                format!("{binary} timed out after {timeout_secs}s")
-            } else {
-                format!(
-                    "{binary} exited with code {}",
-                    code.map(|c| c.to_string()).unwrap_or_else(|| "?".into())
-                )
-            }
+        Some(if cancelled {
+            "Cancelled".to_string()
+        } else if timed_out {
+            format!("{binary} timed out after {timeout_secs}s")
+        } else if hint.is_empty() {
+            format!(
+                "{binary} exited with code {}",
+                code.map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+            )
         } else {
             truncate_output(&hint, 400)
         })
@@ -333,4 +333,45 @@ pub fn safe_prefix(s: &str, max: usize) -> &str {
         .nth(max)
         .map_or(s.len(), |(i, _)| i);
     &s[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_url_adds_https_and_strips_slash() {
+        assert_eq!(
+            normalize_url("example.com/").unwrap(),
+            "https://example.com"
+        );
+        assert_eq!(
+            normalize_url("http://example.com/path").unwrap(),
+            "http://example.com/path"
+        );
+    }
+
+    #[test]
+    fn normalize_url_rejects_shell_metacharacters() {
+        assert!(normalize_url("http://x.com;rm -rf /").is_err());
+        assert!(normalize_url("").is_err());
+    }
+
+    #[test]
+    fn normalize_domain_strips_scheme_and_path() {
+        assert_eq!(
+            normalize_domain("https://Sub.Example.com/path").unwrap(),
+            "sub.example.com"
+        );
+        assert!(normalize_domain("localhost").is_err()); // no dot
+        assert!(normalize_domain("evil.com|x").is_err());
+    }
+
+    #[test]
+    fn safe_prefix_respects_utf8() {
+        let s = "héllo world";
+        let p = safe_prefix(s, 3);
+        assert_eq!(p, "hél");
+        assert!(s.starts_with(p));
+    }
 }

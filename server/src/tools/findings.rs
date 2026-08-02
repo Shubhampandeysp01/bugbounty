@@ -203,7 +203,7 @@ pub async fn list_findings(
     let sev = params.severity.as_deref().unwrap_or("").trim().to_lowercase();
     let status = params.status.as_deref().unwrap_or("").trim().to_lowercase();
 
-    let findings: Vec<Finding> = all
+    let mut findings: Vec<Finding> = all
         .into_iter()
         .filter(|f| {
             let matches_q = q.is_empty()
@@ -216,8 +216,13 @@ pub async fn list_findings(
             let matches_status = status.is_empty() || f.status.eq_ignore_ascii_case(&status);
             matches_q && matches_sev && matches_status
         })
-        // newest first
         .collect();
+    // Newest first (updated_at, then created_at as tie-break).
+    findings.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+    });
 
     Json(StoreResponse {
         ok: true,

@@ -8,7 +8,7 @@ Installed CLIs + Vault UI wrappers. **Each tool is modular** — delete one with
 |----------|--------|----------|
 | **Recon** | Subdomain Enum (subfinder), Archive URLs (waybackurls), Crawler (katana), JS Analysis (builtin) | Asset discovery, surface mapping |
 | **WordPress** | Version Check, User Enum, Plugin Enum, Theme Enum, XML-RPC Probe, Sensitive Paths, REST Surface, WP Nuclei Scan, **WF Vuln Scanner** (Wordfence Intelligence) | Full WP recon + CVE matching |
-| **Websites** | Live Probe (httpx), Vuln Scan (nuclei), Path Fuzz (ffuf), CORS Check (builtin), Open Redirect (builtin) | Target websites |
+| **Websites** | Live Probe (httpx), Vuln Scan (nuclei), Path Fuzz (ffuf), CORS Check (builtin), Open Redirect (builtin), **Security Headers & Cookies** (builtin) | Target websites |
 | **Local Files** | Secrets (gitleaks), FS Vuln (trivy) | Scan a folder/repo on disk |
 
 Builtin tools (JS Analysis, CORS Check, Open Redirect, all WordPress HTTP tools, WF Vuln Scanner) need **no external binaries**.

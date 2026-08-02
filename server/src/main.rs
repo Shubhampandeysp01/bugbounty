@@ -296,6 +296,31 @@ async fn get_tree(State(state): State<Arc<AppState>>) -> Json<Vec<TreeNode>> {
     Json(build_tree(&files))
 }
 
+/// Knowledge-layer roots that `/api/file` is allowed to serve.
+const ALLOWED_FILE_ROOTS: &[&str] = &["guides", "references", "case-studies"];
+
+/// Returns a sanitized relative path under an allowed knowledge root, or `None`.
+fn sanitize_knowledge_path(raw: &str) -> Option<String> {
+    let path = raw.trim().trim_start_matches('/');
+    if path.is_empty() || path.contains('\0') {
+        return None;
+    }
+    if Path::new(path)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir))
+    {
+        return None;
+    }
+    let top = path.split('/').next().unwrap_or("");
+    if !ALLOWED_FILE_ROOTS.contains(&top) {
+        return None;
+    }
+    if !path.ends_with(".md") {
+        return None;
+    }
+    Some(path.to_string())
+}
+
 async fn get_file(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -303,6 +328,11 @@ async fn get_file(
     let path = params.get("path").ok_or_else(|| {
         (StatusCode::BAD_REQUEST, "Missing 'path' parameter".to_string())
     })?;
+
+    // Reject absolute paths, `..`, non-markdown, and anything outside the
+    // knowledge trees (secrets, config, source) before joining.
+    let path = sanitize_knowledge_path(path)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "File not found".to_string()))?;
 
     // Path-traversal guard: only serve real files that resolve inside repo_root.
     let repo_canonical = state
@@ -316,6 +346,17 @@ async fn get_file(
         .map_err(|_| (StatusCode::NOT_FOUND, "File not found".to_string()))?;
 
     if !full_path.starts_with(&repo_canonical) || !full_path.is_file() {
+        return Err((StatusCode::NOT_FOUND, "File not found".to_string()));
+    }
+    // Re-check after canonicalize (symlinks can jump outside allowed roots).
+    let relative_check = full_path
+        .strip_prefix(&repo_canonical)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let top_after = relative_check.split('/').next().unwrap_or("");
+    if !ALLOWED_FILE_ROOTS.contains(&top_after)
+        || full_path.extension().is_none_or(|e| e != "md")
+    {
         return Err((StatusCode::NOT_FOUND, "File not found".to_string()));
     }
 
@@ -334,7 +375,7 @@ async fn get_file(
     let html = render_markdown(&content);
 
     let relative = full_path
-        .strip_prefix(&state.repo_root)
+        .strip_prefix(&repo_canonical)
         .unwrap_or(&full_path)
         .to_string_lossy()
         .to_string();
@@ -354,36 +395,64 @@ async fn search_files(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SearchQuery>,
 ) -> Json<Vec<SearchResult>> {
+    // Cap limit so a client can't force a huge collector.
+    let limit = query.limit.clamp(1, 100);
+    let q = query.q.trim();
+    if q.is_empty() {
+        return Json(vec![]);
+    }
+
     let index = state.index.read().unwrap();
     let schema = &index.schema;
-    let title_field = schema.get_field("title").unwrap();
-    let body_field = schema.get_field("body").unwrap();
-    let path_field = schema.get_field("path").unwrap();
+    let title_field = match schema.get_field("title") {
+        Ok(f) => f,
+        Err(_) => return Json(vec![]),
+    };
+    let body_field = match schema.get_field("body") {
+        Ok(f) => f,
+        Err(_) => return Json(vec![]),
+    };
+    let path_field = match schema.get_field("path") {
+        Ok(f) => f,
+        Err(_) => return Json(vec![]),
+    };
 
-    let reader = index
+    let reader = match index
         .index
         .reader_builder()
         .reload_policy(ReloadPolicy::OnCommitWithDelay)
         .try_into()
-        .unwrap();
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Search reader failed: {e}");
+            return Json(vec![]);
+        }
+    };
 
     let searcher = reader.searcher();
 
     let query_parser = QueryParser::for_index(&index.index, vec![title_field, body_field]);
-    let tantivy_query = match query_parser.parse_query(&query.q) {
+    let tantivy_query = match query_parser.parse_query(q) {
         Ok(q) => q,
         Err(_) => return Json(vec![]),
     };
 
-    let top_docs = searcher
-        .search(&tantivy_query, &TopDocs::with_limit(query.limit).order_by_score())
-        .unwrap();
+    let top_docs = match searcher.search(&tantivy_query, &TopDocs::with_limit(limit).order_by_score())
+    {
+        Ok(docs) => docs,
+        Err(e) => {
+            warn!("Search failed: {e}");
+            return Json(vec![]);
+        }
+    };
 
     let mut results = Vec::new();
     for (score, doc_address) in top_docs {
-        let doc = searcher
-            .doc::<tantivy::TantivyDocument>(doc_address)
-            .unwrap();
+        let doc = match searcher.doc::<tantivy::TantivyDocument>(doc_address) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
         let title: String = doc
             .get_first(title_field)
             .and_then(|v| v.as_str())
@@ -400,7 +469,7 @@ async fn search_files(
             .unwrap_or("")
             .to_string();
 
-        let snippet = generate_snippet(&body, &query.q, 200);
+        let snippet = generate_snippet(&body, q, 200);
 
         results.push(SearchResult {
             path,
@@ -415,29 +484,44 @@ async fn search_files(
 
 fn generate_snippet(text: &str, query: &str, max_len: usize) -> String {
     let lower_text = text.to_lowercase();
-    let lower_query = query.to_lowercase();
+    // Prefer the full query phrase; fall back to the longest token ≥ 3 chars so
+    // multi-word searches still produce a useful window.
+    let needles: Vec<String> = {
+        let full = query.to_lowercase();
+        let mut parts: Vec<String> = full
+            .split_whitespace()
+            .filter(|t| t.len() >= 3)
+            .map(|t| t.to_string())
+            .collect();
+        parts.sort_by_key(|t| std::cmp::Reverse(t.len()));
+        let mut needles = vec![full];
+        needles.extend(parts);
+        needles
+    };
 
-    if let Some(pos) = lower_text.find(&lower_query) {
-        // Only index into `text` with byte math when the hit sits on a valid
-        // char boundary (to_lowercase can shift byte offsets for some scripts).
-        if text.is_char_boundary(pos) {
-            // Use char indices to avoid splitting multi-byte characters
-            let text_chars: Vec<char> = text.chars().collect();
-            let query_chars: Vec<char> = query.chars().collect();
+    for needle in &needles {
+        if needle.is_empty() {
+            continue;
+        }
+        if let Some(pos) = lower_text.find(needle.as_str()) {
+            // Only index into `text` with byte math when the hit sits on a valid
+            // char boundary (to_lowercase can shift byte offsets for some scripts).
+            if text.is_char_boundary(pos) {
+                let text_chars: Vec<char> = text.chars().collect();
+                let needle_len = needle.chars().count();
+                let char_pos = text[..pos].chars().count();
 
-            // Find the char index of the query match
-            let char_pos = text[..pos].chars().count();
+                let context = 60;
+                let start = char_pos.saturating_sub(context);
+                let end = (char_pos + needle_len + context).min(text_chars.len());
 
-            let context = 60;
-            let start = char_pos.saturating_sub(context);
-            let end = (char_pos + query_chars.len() + context).min(text_chars.len());
+                let snippet: String = text_chars[start..end].iter().collect();
 
-            let snippet: String = text_chars[start..end].iter().collect();
-
-            if start > 0 {
-                return format!("...{snippet}...");
+                if start > 0 {
+                    return format!("...{snippet}...");
+                }
+                return format!("{snippet}...");
             }
-            return format!("{snippet}...");
         }
     }
 
@@ -523,10 +607,14 @@ fn start_file_watcher(state: Arc<AppState>) {
 
                         // Rebuild dense embeddings in a fresh thread so this
                         // watcher thread (blocking recv loop) stays responsive.
+                        // Hold the write lock only for the duration of build;
+                        // rebuild keeps the previous index queryable until swap.
                         {
                             let embeddings = state_clone.embeddings.clone();
                             let root = repo_root.clone();
                             std::thread::spawn(move || {
+                                // Try_write would drop rebuilds under load; take
+                                // the write lock so we never race two rebuilds.
                                 let mut idx = embeddings.write().unwrap();
                                 idx.build(&root);
                             });
@@ -655,6 +743,10 @@ async fn main() {
         axum::http::header::HeaderValue::from_static("http://127.0.0.1:3000"),
     ]));
 
+    // Serve UI from the resolved repo root (not process CWD) so launching the
+    // binary from any directory still finds frontend/.
+    let frontend_dir = state.repo_root.join("frontend");
+
     // Build router (library APIs + modular tools)
     let app = Router::new()
         .route("/api/tree", get(get_tree))
@@ -670,12 +762,19 @@ async fn main() {
         .merge(jobs::routes())
         .layer(cors)
         .with_state(state.clone())
-        .fallback_service(ServeDir::new("frontend").append_index_html_on_directories(true));
+        .fallback_service(
+            ServeDir::new(frontend_dir).append_index_html_on_directories(true),
+        );
 
-    let addr = "0.0.0.0:3000";
+    // Default: loopback only. This process can read local files and spawn
+    // scanners — do not expose it on the LAN unless the user opts in.
+    // BUGBOUNTY_BIND=0.0.0.0:3000 (or any host:port) to override.
+    let addr = std::env::var("BUGBOUNTY_BIND").unwrap_or_else(|_| "127.0.0.1:3000".into());
     info!("Server starting on http://{}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to bind {addr}: {e}"));
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -685,6 +784,40 @@ async fn main() {
     // now stop the llama-server we spawned (no orphaned process left behind).
     state.model.shutdown();
     info!("Server stopped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn knowledge_path_allows_library_markdown() {
+        assert_eq!(
+            sanitize_knowledge_path("guides/01-bug-bounty-methodology.md").as_deref(),
+            Some("guides/01-bug-bounty-methodology.md")
+        );
+        assert_eq!(
+            sanitize_knowledge_path("/references/01-research-papers.md").as_deref(),
+            Some("references/01-research-papers.md")
+        );
+    }
+
+    #[test]
+    fn knowledge_path_rejects_traversal_and_secrets() {
+        assert!(sanitize_knowledge_path("../.secrets/key").is_none());
+        assert!(sanitize_knowledge_path("guides/../../.secrets/key").is_none());
+        assert!(sanitize_knowledge_path(".secrets/wordfence_api_key").is_none());
+        assert!(sanitize_knowledge_path("server/rag/model_config.toml").is_none());
+        assert!(sanitize_knowledge_path("guides/readme.txt").is_none());
+        assert!(sanitize_knowledge_path("").is_none());
+    }
+
+    #[test]
+    fn snippet_finds_token_when_full_phrase_missing() {
+        let text = "WordPress plugin enumeration finds installed plugins.";
+        let s = generate_snippet(text, "plugin enumeration fuzz", 200);
+        assert!(s.to_lowercase().contains("plugin"));
+    }
 }
 
 /// Waits for Ctrl+C (SIGINT) or SIGTERM. The model server is shut down after

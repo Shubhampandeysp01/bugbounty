@@ -40,9 +40,16 @@ impl EmbeddingIndex {
 
     /// Builds (or rebuilds) the index for every `*.md` file under repo_root.
     /// Blocking — call on a dedicated thread.
+    ///
+    /// On rebuild, the previous index stays queryable until the new one is
+    /// ready (we do not flip `ready` off at the start), so chat does not fall
+    /// back to BM25-only mid-reindex.
     pub fn build(&mut self, repo_root: &Path) {
-        self.chunks.clear();
-        self.ready = false;
+        let was_ready = self.ready;
+        // Only mark not-ready on the first build; rebuilds keep serving old chunks.
+        if !was_ready {
+            self.ready = false;
+        }
 
         let files = crate::scan_files(repo_root);
         let mut all_texts: Vec<String> = Vec::new();
@@ -95,25 +102,34 @@ impl EmbeddingIndex {
         };
 
         if vectors.len() == all_texts.len() {
+            let mut new_chunks = Vec::with_capacity(all_texts.len());
             for (i, text) in all_texts.into_iter().enumerate() {
                 let (path, title) = meta[i].clone();
-                self.chunks.push(Chunk {
+                new_chunks.push(Chunk {
                     path,
                     title,
                     text,
                     embedding: vectors[i].clone(),
                 });
             }
+            self.chunks = new_chunks;
+            self.ready = true;
             info!("Embedding index ready: {} chunks", self.chunks.len());
+        } else if was_ready {
+            // Keep the previous good index rather than wiping to BM25-only.
+            warn!(
+                "Embedding rebuild partial ({} vectors for {} texts); keeping previous index",
+                vectors.len(),
+                all_texts.len()
+            );
         } else {
             warn!(
                 "Embedding index partial ({} vectors for {} texts); using BM25 only",
                 vectors.len(),
                 all_texts.len()
             );
+            self.ready = true; // empty / partial first build — BM25 fallback
         }
-
-        self.ready = true;
     }
 
     /// Ensures the embedding + reranker models are loaded (idempotent). Call

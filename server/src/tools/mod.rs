@@ -25,6 +25,7 @@ pub mod katana;
 pub mod nuclei;
 pub mod open_redirect;
 pub mod result_cache;
+pub mod security_headers;
 pub mod status;
 pub mod subfinder;
 pub mod trivy;
@@ -103,6 +104,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/tools/ffuf", get(ffuf::ffuf_fuzz))
         .route("/api/tools/cors-check", get(cors_check::cors_check))
         .route("/api/tools/open-redirect", get(open_redirect::open_redirect))
+        .route(
+            "/api/tools/security-headers",
+            get(security_headers::security_headers),
+        )
         // Recon
         .route("/api/tools/subfinder", get(subfinder::subdomain_enum))
         .route("/api/tools/waybackurls", get(waybackurls::archive_urls))
