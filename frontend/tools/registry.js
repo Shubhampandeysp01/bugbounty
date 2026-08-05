@@ -178,10 +178,17 @@ window.VAULT_TOOLS = {
           },
           extras: [
             {
-              type: 'text',
+              type: 'multicheck',
               name: 'severity',
-              placeholder: 'low,medium,high,critical',
               label: 'Severity',
+              options: [
+                { value: 'info', label: 'Info' },
+                { value: 'low', label: 'Low' },
+                { value: 'medium', label: 'Medium' },
+                { value: 'high', label: 'High' },
+                { value: 'critical', label: 'Critical' },
+              ],
+              defaults: ['low', 'medium', 'high', 'critical'],
             },
             {
               type: 'text',
@@ -350,10 +357,17 @@ window.VAULT_TOOLS = {
           },
           extras: [
             {
-              type: 'text',
+              type: 'multicheck',
               name: 'severity',
-              placeholder: 'medium,high,critical',
               label: 'Severity',
+              options: [
+                { value: 'info', label: 'Info' },
+                { value: 'low', label: 'Low' },
+                { value: 'medium', label: 'Medium' },
+                { value: 'high', label: 'High' },
+                { value: 'critical', label: 'Critical' },
+              ],
+              defaults: ['medium', 'high', 'critical'],
             },
             {
               type: 'text',

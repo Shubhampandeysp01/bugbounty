@@ -14,7 +14,20 @@ window.VAULT_TOOL_RUNNERS = {
       }
       if (v) params.set(tool.input.name, v);
     }
+    // Multi-check extras (e.g. nuclei severity) → comma-joined values.
+    const multi = {};
+    formEl.querySelectorAll('input[type="checkbox"][data-extra]').forEach((el) => {
+      if (!el.checked) return;
+      const name = el.dataset.extra;
+      if (!multi[name]) multi[name] = [];
+      multi[name].push(el.value);
+    });
+    Object.entries(multi).forEach(([name, vals]) => {
+      if (vals.length) params.set(name, vals.join(','));
+    });
+    // Text / other single-value extras (skip checkboxes — handled above).
     formEl.querySelectorAll('[data-extra]').forEach((el) => {
+      if (el.type === 'checkbox') return;
       const v = el.value.trim();
       if (v) params.set(el.dataset.extra, v);
     });

@@ -669,14 +669,36 @@ function buildToolsUI() {
       pane.dataset.tool = tool.id;
 
       const extrasHtml = (tool.extras || [])
-        .map(
-          (ex) => `
+        .map((ex) => {
+          if (ex.type === 'multicheck') {
+            const opts = ex.options || [];
+            const defaults = new Set(ex.defaults || []);
+            const chips = opts
+              .map((o) => {
+                const val = o.value || o;
+                const label = o.label || val;
+                const checked = defaults.has(val) ? ' checked' : '';
+                return `<label class="sev-chip sev-chip-${escapeUi(val)}">
+                  <input type="checkbox" data-extra="${escapeUi(ex.name)}" value="${escapeUi(val)}"${checked}>
+                  <span>${escapeUi(label)}</span>
+                </label>`;
+              })
+              .join('');
+            return `
+              <div class="tool-field tool-field-multicheck">
+                <span class="tool-field-label">${escapeUi(ex.label || ex.name)}</span>
+                <div class="sev-chip-group" data-multicheck="${escapeUi(ex.name)}" role="group" aria-label="${escapeUi(ex.label || ex.name)}">
+                  ${chips}
+                </div>
+              </div>`;
+          }
+          return `
           <label class="tool-field">
             <span class="tool-field-label">${escapeUi(ex.label || ex.name)}</span>
             <input type="${escapeUi(ex.type || 'text')}" data-extra="${escapeUi(ex.name)}"
               placeholder="${escapeUi(ex.placeholder || '')}" autocomplete="off">
-          </label>`
-        )
+          </label>`;
+        })
         .join('');
 
       const defaultVal = tool.input.defaultValue

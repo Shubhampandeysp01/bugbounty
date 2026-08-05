@@ -757,7 +757,11 @@ body.sidebar-drawer-open {
   margin-bottom: 8px;
 }
 
-.tool-extras input {
+.tool-extras .tool-field-multicheck {
+  grid-column: 1 / -1;
+}
+
+.tool-extras input:not([type="checkbox"]) {
   height: 40px;
   padding: 0 12px;
   background: var(--bg-secondary);
@@ -770,9 +774,81 @@ body.sidebar-drawer-open {
   width: 100%;
 }
 
-.tool-extras input:focus {
+.tool-extras input:not([type="checkbox"]):focus {
   border-color: var(--blue);
   box-shadow: 0 0 0 3px var(--blue-dim);
+}
+
+/* Nuclei severity multi-select chips */
+.sev-chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sev-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.sev-chip input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.sev-chip:hover {
+  border-color: var(--border-light);
+  color: var(--text-primary);
+}
+
+.sev-chip:has(input:checked) {
+  color: var(--text-primary);
+  border-color: var(--blue);
+  background: var(--blue-dim);
+}
+
+.sev-chip:has(input:focus-visible) {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.sev-chip-critical:has(input:checked) {
+  border-color: var(--red);
+  background: rgba(255, 107, 107, 0.12);
+  color: var(--red);
+}
+
+.sev-chip-high:has(input:checked) {
+  border-color: var(--orange);
+  background: rgba(255, 154, 90, 0.12);
+  color: var(--orange);
+}
+
+.sev-chip-medium:has(input:checked) {
+  border-color: var(--yellow);
+  background: rgba(245, 215, 110, 0.12);
+  color: var(--yellow);
+}
+
+.sev-chip-low:has(input:checked),
+.sev-chip-info:has(input:checked) {
+  border-color: var(--blue);
+  background: var(--blue-dim);
+  color: var(--blue);
 }
 
 .tool-results-grid {
