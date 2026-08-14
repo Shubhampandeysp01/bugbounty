@@ -5,7 +5,7 @@ use axum::{extract::Query, http::StatusCode, response::Json};
 use serde::Serialize;
 use std::collections::HashMap;
 
-use super::common::{http_client, normalize_url};
+use super::common::{get_with_retry, http_client, normalize_url};
 
 #[derive(Debug, Serialize)]
 pub struct WpPathHit {
@@ -313,10 +313,11 @@ pub async fn wordpress_paths(
     let mut findings = Vec::new();
     let mut notes = Vec::new();
     let mut error = None;
+    let mut failed = 0usize;
 
     for spec in PATHS {
         let full = format!("{base}{}", spec.path);
-        match client.get(&full).send().await {
+        match get_with_retry(&client, &full, 3).await {
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 // Interesting statuses
@@ -386,11 +387,7 @@ pub async fn wordpress_paths(
                     });
                 }
             }
-            Err(e) => {
-                if error.is_none() {
-                    error = Some(format!("Request error: {e}"));
-                }
-            }
+            Err(_) => failed += 1,
         }
     }
 
@@ -406,6 +403,17 @@ pub async fn wordpress_paths(
 
     notes.push(format!("Probed {} sensitive WordPress paths", PATHS.len()));
     notes.push(format!("{} interesting responses", findings.len()));
+    if failed > 0 {
+        if failed >= PATHS.len() {
+            error = Some(format!(
+                "All {failed} path probes failed — target may be unreachable or blocking this tool"
+            ));
+        } else {
+            notes.push(format!(
+                "{failed} path probe(s) failed (transient network errors — results may be incomplete)"
+            ));
+        }
+    }
 
     let resp = WpPathsResponse {
         url: base,

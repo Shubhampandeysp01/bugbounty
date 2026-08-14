@@ -25,6 +25,32 @@ pub fn http_client(timeout_secs: u64) -> Result<Client, String> {
         .map_err(|e| format!("HTTP client error: {e}"))
 }
 
+/// GET a URL with short retries for transient transport errors (connect/timeout).
+/// One flaky probe out of dozens shouldn't kill a whole enumeration run — and
+/// retrying usually recovers versions (style.css, readme.txt) that a single
+/// dropped connection would otherwise hide. Returns the first successful
+/// response, or the last error once retries are exhausted.
+pub async fn get_with_retry(
+    client: &Client,
+    url: &str,
+    max_tries: usize,
+) -> Result<reqwest::Response, reqwest::Error> {
+    for attempt in 0..max_tries.max(1) {
+        match client.get(url).send().await {
+            Ok(resp) => return Ok(resp),
+            Err(e) if e.is_connect() || e.is_timeout() => {
+                if attempt + 1 >= max_tries.max(1) {
+                    return Err(e);
+                }
+                // Linear backoff (200ms, 400ms, …) to ride out throttling.
+                tokio::time::sleep(Duration::from_millis(200 * (attempt as u64 + 1))).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("get_with_retry always returns inside the loop")
+}
+
 #[derive(Debug, Serialize)]
 pub struct CliResult {
     pub ok: bool,

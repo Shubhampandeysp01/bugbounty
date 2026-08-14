@@ -4,7 +4,7 @@ use axum::{extract::Query, http::StatusCode, response::Json};
 use serde::Serialize;
 use std::collections::HashMap;
 
-use super::common::{http_client, normalize_url};
+use super::common::{get_with_retry, http_client, normalize_url};
 
 #[derive(Debug, Serialize)]
 pub struct WpThemeHit {
@@ -107,7 +107,7 @@ pub async fn wordpress_themes(
     let mut error = None;
 
     // HTML references first — active theme almost always leaks here
-    if let Ok(resp) = client.get(&base).send().await {
+    if let Ok(resp) = get_with_retry(&client, &base, 3).await {
         match resp.text().await {
             Ok(body) => {
                 let from_html = extract_themes_from_html(&body);
@@ -145,9 +145,11 @@ pub async fn wordpress_themes(
         }
     }
 
+    let mut failed = 0usize;
+    let probe_total = to_probe.len();
     for slug in to_probe {
         let style = format!("{base}/wp-content/themes/{slug}/style.css");
-        match client.get(&style).send().await {
+        match get_with_retry(&client, &style, 3).await {
             Ok(resp) if resp.status().is_success() => {
                 if let Ok(body) = resp.text().await {
                     if body.contains("Theme Name:") || body.contains("Version:") {
@@ -175,11 +177,19 @@ pub async fn wordpress_themes(
                 }
             }
             Ok(_) => {}
-            Err(e) => {
-                if error.is_none() {
-                    error = Some(format!("Request error: {e}"));
-                }
-            }
+            Err(_) => failed += 1,
+        }
+    }
+
+    if failed > 0 {
+        if failed == probe_total {
+            error = Some(format!(
+                "All {failed} theme probes failed — target may be unreachable or blocking this tool"
+            ));
+        } else {
+            notes.push(format!(
+                "{failed} style.css probe(s) failed (transient network errors — results may be incomplete)"
+            ));
         }
     }
 

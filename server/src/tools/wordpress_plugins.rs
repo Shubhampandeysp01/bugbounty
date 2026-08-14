@@ -5,7 +5,7 @@ use axum::{extract::Query, http::StatusCode, response::Json};
 use serde::Serialize;
 use std::collections::HashMap;
 
-use super::common::{http_client, normalize_url};
+use super::common::{get_with_retry, http_client, normalize_url};
 
 #[derive(Debug, Serialize)]
 pub struct WpPluginHit {
@@ -151,11 +151,12 @@ pub async fn wordpress_plugins(
     let mut plugins = Vec::new();
     let mut notes = Vec::new();
     let mut error = None;
+    let mut failed = 0usize;
 
     // Concurrent-ish sequential with small batches to avoid hammering
     for slug in PLUGIN_SLUGS {
         let readme = format!("{base}/wp-content/plugins/{slug}/readme.txt");
-        match client.get(&readme).send().await {
+        match get_with_retry(&client, &readme, 3).await {
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 if status == 200 {
@@ -181,16 +182,12 @@ pub async fn wordpress_plugins(
                     }
                 }
             }
-            Err(e) => {
-                if error.is_none() {
-                    error = Some(format!("Request error (continuing): {e}"));
-                }
-            }
+            Err(_) => failed += 1,
         }
 
         // Fallback: plugin main directory listing / main php (404 vs 403 vs 200)
         let dir = format!("{base}/wp-content/plugins/{slug}/");
-        if let Ok(resp) = client.get(&dir).send().await {
+        if let Ok(resp) = get_with_retry(&client, &dir, 3).await {
             let status = resp.status().as_u16();
             if status == 200 || status == 403 {
                 // 403 often means exists but listing denied
@@ -230,7 +227,7 @@ pub async fn wordpress_plugins(
     }
 
     // Also parse homepage for /wp-content/plugins/slug/ references
-    if let Ok(resp) = client.get(&base).send().await {
+    if let Ok(resp) = get_with_retry(&client, &base, 3).await {
         if let Ok(body) = resp.text().await {
             let found_in_html = extract_plugins_from_html(&body);
             for slug in found_in_html {
@@ -249,6 +246,19 @@ pub async fn wordpress_plugins(
             notes.push(format!(
                 "HTML parse + readme probe of {} popular plugins",
                 PLUGIN_SLUGS.len()
+            ));
+        }
+    }
+
+    let probed_total = PLUGIN_SLUGS.len();
+    if failed > 0 {
+        if failed >= probed_total {
+            error = Some(format!(
+                "All {failed} plugin probes failed — target may be unreachable or blocking this tool"
+            ));
+        } else {
+            notes.push(format!(
+                "{failed} plugin probe(s) failed (transient network errors — results may be incomplete)"
             ));
         }
     }
