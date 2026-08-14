@@ -24,7 +24,7 @@ window.VAULT_TOOLS = {
           badge: 'View',
           title: 'Attack Surface Explorer',
           blurb:
-            'Aggregate every WordPress tool result into one filterable, searchable tree — Core, Authentication, REST API, Plugins, Themes, Sensitive Files, Security Headers, Vulnerabilities, Infrastructure. Reuses existing tool outputs (no re-scanning) and refreshes live as jobs complete.',
+            'Aggregate every WordPress tool result into one filterable, searchable tree — Core, Authentication, REST API, Plugins, Themes, Sensitive Files, Security Headers, Vulnerabilities, Infrastructure. Run auto-executes every source scan that has not run for the target yet and refreshes the tree live as each completes.',
           binary: null,
           input: {
             type: 'url',

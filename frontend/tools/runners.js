@@ -1216,7 +1216,10 @@ window.VAULT_TOOL_RUNNERS = {
           (p) => !p.classList.contains('hidden')
         );
         const root = pane && pane.querySelector('[data-ase-root]');
-        if (root) window.AttackSurfaceExplorer.bind(root, data);
+        if (root) {
+          window.AttackSurfaceExplorer.bind(root, data);
+          window.AttackSurfaceExplorer.runAllMissing();
+        }
       });
       return html;
     },
@@ -1707,7 +1710,7 @@ window.AttackSurfaceExplorer = (() => {
     });
   }
 
-  async function runMissing(toolId) {
+  async function runMissing(toolId, opts = {}) {
     const tool = window.VAULT_TOOLS.getTool(toolId);
     if (!tool || !state.url) return;
     if (state.pending.has(toolId)) return; // already starting
@@ -1720,27 +1723,33 @@ window.AttackSurfaceExplorer = (() => {
     try {
       if (tool.async) {
         if (toolRunningOn(toolId, url)) {
-          window.VaultJobs.toast(`${tool.label} is already running for this target`, {
-            type: 'warn',
-            body: 'Open the Job Center to watch live progress.',
-          });
+          if (!opts.bulk) {
+            window.VaultJobs.toast(`${tool.label} is already running for this target`, {
+              type: 'warn',
+              body: 'Open the Job Center to watch live progress.',
+            });
+          }
           return;
         }
         const job = await window.VaultJobs.submit(toolId, { url });
-        window.VaultJobs.toast(`Started ${tool.label}`, {
-          type: 'info',
-          body: `${job.id} · the tree refreshes when it completes.`,
-          timeout: 4500,
-        });
+        if (!opts.bulk) {
+          window.VaultJobs.toast(`Started ${tool.label}`, {
+            type: 'info',
+            body: `${job.id} · the tree refreshes when it completes.`,
+            timeout: 4500,
+          });
+        }
       } else {
         const res = await fetch(`${tool.endpoint}?url=${encodeURIComponent(url)}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         await refetch();
-        window.VaultJobs.toast(`${tool.label} done — Attack Surface refreshed`, {
-          type: 'ok',
-          body: '',
-          timeout: 3500,
-        });
+        if (!opts.bulk) {
+          window.VaultJobs.toast(`${tool.label} done — Attack Surface refreshed`, {
+            type: 'ok',
+            body: '',
+            timeout: 3500,
+          });
+        }
       }
     } catch (err) {
       window.VaultJobs.toast(`Failed to run ${tool.label}`, {
@@ -1751,6 +1760,23 @@ window.AttackSurfaceExplorer = (() => {
       if (!keepPending) state.pending.delete(toolId);
       render();
     }
+  }
+
+  // Auto-run every source that hasn't produced a result for this target yet.
+  // Called from the Run button: fires the sync scans in parallel and submits the
+  // async (job-backed) scans; the tree refreshes live as each one completes.
+  function runAllMissing() {
+    if (!state.url || !state.data || !state.data.missing) return;
+    const missing = state.data.missing.filter((m) => {
+      const tool = window.VAULT_TOOLS.getTool(m.tool);
+      return tool && !state.pending.has(m.tool);
+    });
+    if (!missing.length) return;
+    window.VaultJobs.toast(
+      `Running ${missing.length} WordPress scans for this target — tree refreshes as each completes`,
+      { type: 'info', body: '', timeout: 4000 }
+    );
+    for (const m of missing) runMissing(m.tool, { bulk: true });
   }
 
   function expandAll() {
@@ -1772,6 +1798,7 @@ window.AttackSurfaceExplorer = (() => {
     setQuery,
     refetch,
     runMissing,
+    runAllMissing,
     expandAll,
     collapseAll,
     state,
